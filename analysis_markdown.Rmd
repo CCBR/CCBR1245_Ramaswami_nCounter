@@ -1,0 +1,397 @@
+---
+title: "nCounter_RNA_Analysis"
+author: "Ned Cauley"
+date: "12/13/23"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set up libraries and QC functions libraries
+
+```{r Libraries and RUVseq functions, message=FALSE, warning=FALSE}
+library(NanoStringQCPro)
+library(ggplot2)
+library(EnvStats)
+library(MASS)
+library(RUVSeq)
+library(DESeq2)
+library(limma)
+library(matrixStats)
+library(limma)
+library(NanoStringNorm)
+library(readxl)
+
+setwd("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/Ramya_analysis_Dec2023")
+
+# Functions for RUVseq analysis
+source("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/R/nanostring_RUV_functions.R")
+
+# Load the annotation file
+annotation_file_path <- "ncounter_rna_annotation_edit.xlsx"
+annotation_df <- read_excel(annotation_file_path)
+
+```
+
+## Setup the initial dataframes with read counts and metadata/QC
+
+```{r Initial Dataframes and QC,  message=FALSE, warning=FALSE}
+# Gather the names of the RCC files
+files.RCC = list.files("rcc")
+files.RCC = files.RCC[grepl('RCC',files.RCC)]
+# Add name of sub folder containing RCC files
+rcc_folder <- "rcc"
+files.RCC <- file.path(rcc_folder, files.RCC)
+
+# Gather number of genes and samples
+genes.count = nrow(readRcc(files.RCC[1])$Code_Summary)
+ncol = length(files.RCC)
+
+# Set up the dataframe to hold all sample and gene data
+raw_expression = as.data.frame(matrix(nrow = genes.count,ncol = length(files.RCC)+2))
+colnames(raw_expression)[1:2] = c('Gene','Class')
+
+# Set up a dataframe to hold metadata and QC
+pData = as.data.frame(matrix(nrow = length(files.RCC),ncol = 11))
+colnames(pData) = c('BCAC_ID','SampleID','Owner','Comments','Date','GeneRLF','SystemAPF','imagingQC',
+                    'bindingDensityQC','limitOfDetectionQC','positiveLinearityQC')
+
+# Populate gene and class columns of expression df
+raw_expression[,1:2] = readRcc(files.RCC[1])$Code_Summary[,c(2,1)]
+
+print("RCC files to be processed:")
+# Populate expression df, run QC, and record flags for each sample
+for (i in 1:length(files.RCC)){
+  
+  print(files.RCC[i])
+  rcc = readRcc(files.RCC[i])
+  raw = rcc$Code_Summary
+  
+  raw_expression[,i+2] = as.numeric(raw$Count)
+  colnames(raw_expression)[i+2] = strsplit(files.RCC[i],'_')[[1]][1]
+  pData[i,2:7] = as.vector(rcc$Sample_Attributes)
+  pData$imagingQC[i] = imagingQC(rcc)
+  pData$bindingDensityQC[i] = bindingDensityQC(rcc,.05,2.25)
+  pData$limitOfDetectionQC[i] = limitOfDetectionQC(rcc)
+  pData$positiveLinearityQC[i] = positiveLinQC(rcc)
+  
+}
+
+# Assign metadata using the annotation file
+#pData$Group = as.factor(rep(c('NK_alone','CTV_6hrs',
+#                              'CTV_16hrs','IL2'),each = 3))
+
+# Correct the sample ID column name and sample name IDs
+# Correct for annotation
+colnames(annotation_df)[4] <- "SampleID"
+annotation_df$"SampleID" <- gsub("-", " ", annotation_df$"SampleID")
+# Correct for pdata
+annotation_df$"SampleID" <- gsub("-", " ", annotation_df$"SampleID")
+annotation_df$"SampleID" <- gsub("\\sSB", "SB", annotation_df$"SampleID")
+pData$"SampleID" <- gsub("-", " ", pData$"SampleID")
+pData$"SampleID" <- gsub("\\sSB", "SB", pData$"SampleID")
+
+# Combine all metadata into a single dataframe
+merged_pData <- merge(pData, annotation_df, by = "SampleID")
+
+# Rename and factor the KS alone field and sort by Yes or No
+colnames(merged_pData)[colnames(merged_pData) == "KS alone"] <- "KS_alone"
+merged_pData$KS_alone <- factor(merged_pData$'KS_alone', levels = c("Y", "N"))
+
+# Create a feature df
+raw = raw_expression[,-c(1:2)]
+fData = raw_expression[,c(1:2)]
+rownames(raw) = fData$Gene
+# List the housekeeping genes and label in the fData df
+cIdx <- fData$Gene[fData$Class == "Housekeeping"]
+merged_pData$HK_Gene_Miss = colSums(raw[cIdx,] == 0)
+
+# Sync all of the rownames of the three dfs
+rownames(fData) = fData$Gene
+rownames(raw) = fData$Gene
+rownames(merged_pData) = colnames(raw)
+
+print("Initial data frames")
+head(raw_expression)
+head(pData)
+head(fData)
+
+```
+
+## Verify that housekeeping genes are not DEGs
+
+```{r, message=FALSE, warning=FALSE}
+###
+#### CHECK IF HK ARE ASSOCIATED WITH PRIMARY PHENO
+###
+
+# Gather the read counts for housekeeping genes
+hk_raw = raw[cIdx,]
+pval = vector(length = nrow(hk_raw))
+
+# Run general linear model to get pvalue for housekeeping
+for (i in 1:nrow(hk_raw)){
+  
+  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$KS_alone))
+  pval[i] = coef(summary(reg))[2,4]
+  
+}
+
+print("Housekeeping genes:")
+print(rownames(hk_raw))
+
+# Number of housekeeping that are DE
+print("Number of housekeeping genes that are DE:")
+sum(pval <= .05)
+
+```
+
+## Run RUVseq differential expression analysis
+
+```{r, message=FALSE, warning=FALSE}
+k = 1
+# DEseq transform for RUVseq
+vsd = RUV_total(raw,merged_pData,fData,k = k)$vsd
+# Set Expression Set
+set = RUV_total(raw,merged_pData,fData,k = k)$set
+
+# Save the results
+save(vsd,file = paste0("cauley_ruv_vsd_k_",k,".rda"))
+save(set,file = paste0("cauley_ruv_set_k_",k,".rda"))
+
+
+i = 1
+
+results = paste0("cauley_deg_k",i,".csv")
+load(paste0("cauley_ruv_set_k_",i,".rda"))
+# DEseq Dataset
+dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+                              colData = pData(set),
+                              design = ~ W_1 + KS_alone)
+# Run DEseq
+dds <- DESeq(dds)
+
+# Generate contrasts per group
+ks_alone_ruv <- as.data.frame(results(dds,contrast = c('KS_alone','Y','N')))
+
+ks_alone_ruv_deg_list <- ks_alone_ruv[ks_alone_ruv$pvalue < 0.05, ]
+```
+
+## Run nSolver differential expression analysis 
+
+
+```{r, message=FALSE, warning=FALSE}
+# Set up the DEseq matrix for nsolver
+dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+                                      colData = pData(set),
+                                      design = ~KS_alone)
+
+pos = raw[grepl('POS',rownames(raw)),]
+
+# Housekeeping genes expression
+hk = raw[grepl('Housekeeping',raw_expression$Class),]
+
+# Set up nSolver
+pos.factors = mean(as.numeric(apply(pos,2,geoMean)))/as.numeric(apply(pos,2,geoMean))
+hk.factors = mean(as.numeric(apply(hk,2,geoMean)))/as.numeric(apply(hk,2,geoMean))
+sizeFactors(dds.nsolver) <- pos.factors * hk.factors
+
+# Run DEseq
+dds.nsolver <- DESeq(dds.nsolver)
+
+# Generate contrasts for each group for nSolver analysis
+ks_alone_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('KS_alone','Y','N')))
+
+ks_alone_nsolver_deg_list <- ks_alone_nsolver[ks_alone_nsolver$pvalue < 0.05, ]
+
+
+# Overlapping genes between the methods
+ks_alone_nsolver_deg_genes <- rownames(ks_alone_nsolver_deg_list)
+ks_alone_ruv_deg_genes <- rownames(ks_alone_ruv_deg_list)
+shared_gene_list <- intersect(ks_alone_nsolver_deg_genes, ks_alone_ruv_deg_genes)
+
+```
+
+# Create the plot for comparing RUVseq vs. nSolver p-values
+
+```{r pvalue_ruvseq_v_nsolver, message=FALSE, warning=FALSE}
+
+# Create comparison plots between RUVseq and nSolver analysis
+pval.plot.ks_alone = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(ks_alone_ruv)),
+                           P = c(ks_alone_nsolver$pvalue,ks_alone_ruv$pvalue))
+pval.plot.ks_alone$Contrast = 'KS_alone'
+
+pval.plot.ks_alone$Contrast = as.factor(pval.plot.ks_alone$Contrast)
+pvals = ggplot(data = pval.plot.ks_alone,
+               aes(x = P,color = Method,
+                   fill = Method)) + geom_histogram(alpha = .2) +
+  facet_wrap(~Contrast) + theme_minimal() +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=24),
+        plot.title = element_text(size = 30),
+        legend.title=element_text(size=20),
+        legend.text=element_text(size=20),
+        strip.text = element_text(size=24),
+        panel.spacing=unit(1, "lines"),
+        panel.border = element_rect(color = "grey", 
+                                    fill = NA, size = .1),
+        legend.position = 'bottom') +
+  scale_color_manual(values = c("#377EB8","#E41A1C","#4DAF4A")) + 
+  scale_fill_manual(values = c("#377EB8","#E41A1C","#4DAF4A")) +
+  ylab('Count')
+
+print(pvals)
+
+```
+
+## Set up boxplots for comparing counts
+
+```{r, message=FALSE, warning=FALSE}
+#### IL2
+# Create RUVseq vs. nSolver comparison plot for IL2
+
+# Gather stat sig DEGs from each method
+ks_alone_ruv_degs = subset(ks_alone_ruv,pvalue < 0.05)
+ks_alone_nsolver_degs = subset(ks_alone_nsolver,pvalue < 0.05)
+nrow(ks_alone_ruv_degs)
+nrow(ks_alone_nsolver_degs)
+
+# Overlapping DEGs
+length(intersect(rownames(ks_alone_ruv_degs),rownames(ks_alone_nsolver_degs)))
+degs.both = intersect(rownames(ks_alone_ruv_degs),rownames(ks_alone_nsolver_degs))
+
+# Label DEGS from each method
+ks_alone_ruv_degs_unique = rownames(ks_alone_ruv_degs)[!(rownames(ks_alone_ruv_degs) %in% degs.both)]
+ks_alone_nsolver_degs_unique = rownames(ks_alone_nsolver_degs)[!(row.names(ks_alone_nsolver_degs) %in% degs.both)]
+
+# Set up matrix for il2 comparison boxplot 
+boxplot.df = data.frame(Method = c(rep('Both',length(degs.both)),
+                                       rep('RUVSeq',length(ks_alone_ruv_degs_unique)),
+                                       rep('nSolver',length(ks_alone_nsolver_degs_unique))),
+                            Median = c(rowMedians(as.matrix(log2(raw[rownames(raw) %in% degs.both,]+1))),
+                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% ks_alone_ruv_degs_unique,]+1))),
+                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% ks_alone_nsolver_degs_unique,]+1)))))
+boxplot.df$Contrast = 'KS_alone'
+
+# Run Nanostring normalization 
+colnames(raw_expression)[1:2] = c('Name','Code.Class')
+NanoString.mRNA.norm <- NanoStringNorm(
+  x = raw_expression,
+  anno = NA,
+  CodeCount = 'sum',
+  Background = 'none',
+  SampleContent = 'housekeeping.sum',
+  round.values = FALSE,
+  take.log = TRUE,
+  return.matrix.of.endogenous.probes = TRUE
+)
+
+boxplot.df$Contrast = as.factor(boxplot.df$Contrast)
+
+```
+
+## Create the boxplot for count comparison
+
+```{r compare_counts_boxplot, message=FALSE, warning=FALSE}
+
+# Create boxplot
+boxplot = ggplot(data = boxplot.df,
+                 aes(x = Method,
+                     y = Median)) + geom_boxplot() + 
+  geom_jitter(shape=16, position=position_jitter(0.2)) +
+  theme_minimal() +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=24),
+        plot.title = element_text(size = 30),
+        legend.title=element_text(size=20),
+        legend.text=element_text(size=20),
+        strip.text = element_text(size=24),
+        panel.spacing=unit(1, "lines"),
+        panel.border = element_rect(color = "grey", 
+                                    fill = NA, size = .1),
+        legend.position = 'bottom') + ylab('Median raw log-counts') + facet_wrap(~Contrast)
+
+print(boxplot)
+
+```
+
+# Set up the plot to compare log fold change
+
+```{r, message=FALSE, warning=FALSE}
+
+# Set up dot plot
+
+# Gather genes for each method and overlapping genes
+res_il2.plot = subset(res_il2,rownames(res_il2) %in% c(il2.both,rownames(il2.nsolver),
+                                                       rownames(il2.ruv)))
+res_il2.nsolver.plot = subset(res_il2.nsolver,
+                              rownames(res_il2) %in% 
+                                c(il2.both,rownames(il2.nsolver),rownames(il2.ruv)))
+
+# Matrix of fold change per method
+res_il2.plot.tot = data.frame(Gene = rownames(res_il2.plot),
+                              nSolverFC = res_il2.nsolver.plot$log2FoldChange,
+                              nSolverSE = res_il2.nsolver.plot$lfcSE,
+                              RUVFC = res_il2.plot$log2FoldChange,
+                              RUVSE = res_il2.plot$lfcSE)
+
+# Label fold change matrix
+res_il2.plot.tot$Method = ifelse(res_il2.plot.tot$Gene %in% il2.both,'Both',
+                                 ifelse(res_il2.plot.tot$Gene %in% rownames(il2.nsolver),
+                                        'nSolver only','RUVSeq only'))
+res_il2.plot.tot$Contrast = 'IL-2'
+
+# Repeat the methods for fold change matrix for CTV-1
+res_ctv.plot = subset(res6,rownames(res6) %in% c(ctv.both,only.ctv.nsolver,
+                                                 only.ctv.ruv))
+res_ctv.nsolver.plot = subset(res6.nsolver,
+                              rownames(res6) %in% 
+                                c(ctv.both,only.ctv.nsolver,
+                                  only.ctv.ruv))
+res_ctv.plot.tot = data.frame(Gene = rownames(res_ctv.nsolver.plot),
+                              nSolverFC = res_ctv.nsolver.plot$log2FoldChange,
+                              nSolverSE = res_ctv.nsolver.plot$lfcSE,
+                              RUVFC = res_ctv.plot$log2FoldChange,
+                              RUVSE = res_ctv.plot$lfcSE)
+res_ctv.plot.tot$Method = ifelse(res_ctv.plot.tot$Gene %in% ctv.both,'Both',
+                                 ifelse(res_ctv.plot.tot$Gene %in% only.ctv.nsolver,
+                                        'nSolver only','RUVSeq only'))
+res_ctv.plot.tot$Contrast = 'CTV-1'
+res.plot.tot = rbind(res_il2.plot.tot,
+                     res_ctv.plot.tot)
+
+# Create the comparison dot plots for fold change with both IL2 and CTV-1
+res.plot.tot$Contrast = as.factor(res.plot.tot$Contrast)
+res.plot.tot$Method = factor(res.plot.tot$Method,
+                             levels = c('Both','nSolver only','RUVSeq only'))
+res.plot.tot = res.plot.tot[order(res.plot.tot$Method,decreasing = T),]
+
+```
+
+## Create the plot for comparing fold change between analysis methods
+
+```{r fold_change_comparison_plot, message=FALSE, warning=FALSE}
+fc.plot = ggplot(data = res.plot.tot,
+                 aes(x = RUVFC, y = nSolverFC, color = Method)) + geom_point(aes(size = RUVSE)) +
+  scale_color_manual(values = c("#4DAF4A","#377EB8","#E41A1C")) + 
+  geom_hline(yintercept = 0,linetype = 2) +
+  geom_vline(xintercept = 0,linetype = 2) +  theme_minimal() +
+  theme(axis.text=element_text(size=12),
+        axis.title=element_text(size=24),
+        plot.title = element_text(size = 30),
+        legend.title=element_text(size=20),
+        legend.text=element_text(size=20),
+        strip.text = element_text(size=24),
+        panel.spacing=unit(1, "lines"),
+        panel.border = element_rect(color = "grey", 
+                                    fill = NA, size = .1),
+        legend.position = 'bottom') + facet_wrap(~Contrast) +
+  xlab('Log-fold change (RUVSeq)') + ylab('Log-fold change (nSolver)') +
+  labs(size = 'SE (RUVSeq)') + geom_abline(slope = 1,intercept = 0,linetype = 2, color='grey') +
+  guides(colour = guide_legend(override.aes = list(size=4)))
+
+print(fc.plot)
+
+```
