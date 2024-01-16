@@ -5,6 +5,9 @@ date: "12/13/23"
 output: html_document
 ---
 
+# This markdown and analysis based on https://github.com/bhattacharya-a-bt/CBCS_normalization/blob/master/sabry_analysis.R
+# The above analysis is form the publication https://academic.oup.com/bib/article/22/3/bbaa163/5891144?login=true
+
 ```{r setup}
 knitr::opts_chunk$set(echo = TRUE)
 ```
@@ -78,10 +81,6 @@ for (i in 1:length(files.RCC)){
   pData$positiveLinearityQC[i] = positiveLinQC(rcc)
   
 }
-
-# Assign metadata using the annotation file
-#pData$Group = as.factor(rep(c('NK_alone','CTV_6hrs',
-#                              'CTV_16hrs','IL2'),each = 3))
 
 # Correct the sample ID column name and sample name IDs
 # Correct for annotation
@@ -324,56 +323,41 @@ print(boxplot)
 # Set up dot plot
 
 # Gather genes for each method and overlapping genes
-res_il2.plot = subset(res_il2,rownames(res_il2) %in% c(il2.both,rownames(il2.nsolver),
-                                                       rownames(il2.ruv)))
-res_il2.nsolver.plot = subset(res_il2.nsolver,
-                              rownames(res_il2) %in% 
-                                c(il2.both,rownames(il2.nsolver),rownames(il2.ruv)))
+#res_il2.plot = subset(res_il2,rownames(res_il2) %in% c(il2.both,rownames(il2.nsolver),
+#                                                       rownames(il2.ruv)))
+
+ks_alone.plot = subset(ks_alone_ruv,rownames(ks_alone_ruv) %in% c(degs.both,rownames(ks_alone_nsolver_degs),
+                                                       rownames(ks_alone_ruv_degs)))
+
+ks_alone.nsolver.plot = subset(ks_alone_nsolver,
+                              rownames(ks_alone_ruv) %in% 
+                                c(degs.both,rownames(ks_alone_nsolver_degs),rownames(ks_alone_ruv_degs)))
 
 # Matrix of fold change per method
-res_il2.plot.tot = data.frame(Gene = rownames(res_il2.plot),
-                              nSolverFC = res_il2.nsolver.plot$log2FoldChange,
-                              nSolverSE = res_il2.nsolver.plot$lfcSE,
-                              RUVFC = res_il2.plot$log2FoldChange,
-                              RUVSE = res_il2.plot$lfcSE)
+ks_alone.plot.tot = data.frame(Gene = rownames(ks_alone.plot),
+                              nSolverFC = ks_alone.nsolver.plot$log2FoldChange,
+                              nSolverSE = ks_alone.nsolver.plot$lfcSE,
+                              RUVFC = ks_alone.plot$log2FoldChange,
+                              RUVSE = ks_alone.plot$lfcSE)
 
 # Label fold change matrix
-res_il2.plot.tot$Method = ifelse(res_il2.plot.tot$Gene %in% il2.both,'Both',
-                                 ifelse(res_il2.plot.tot$Gene %in% rownames(il2.nsolver),
+ks_alone.plot.tot$Method = ifelse(ks_alone.plot.tot$Gene %in% degs.both,'Both',
+                                 ifelse(ks_alone.plot.tot$Gene %in% rownames(ks_alone_nsolver),
                                         'nSolver only','RUVSeq only'))
-res_il2.plot.tot$Contrast = 'IL-2'
+ks_alone.plot.tot$Contrast = 'ks_alone'
 
-# Repeat the methods for fold change matrix for CTV-1
-res_ctv.plot = subset(res6,rownames(res6) %in% c(ctv.both,only.ctv.nsolver,
-                                                 only.ctv.ruv))
-res_ctv.nsolver.plot = subset(res6.nsolver,
-                              rownames(res6) %in% 
-                                c(ctv.both,only.ctv.nsolver,
-                                  only.ctv.ruv))
-res_ctv.plot.tot = data.frame(Gene = rownames(res_ctv.nsolver.plot),
-                              nSolverFC = res_ctv.nsolver.plot$log2FoldChange,
-                              nSolverSE = res_ctv.nsolver.plot$lfcSE,
-                              RUVFC = res_ctv.plot$log2FoldChange,
-                              RUVSE = res_ctv.plot$lfcSE)
-res_ctv.plot.tot$Method = ifelse(res_ctv.plot.tot$Gene %in% ctv.both,'Both',
-                                 ifelse(res_ctv.plot.tot$Gene %in% only.ctv.nsolver,
-                                        'nSolver only','RUVSeq only'))
-res_ctv.plot.tot$Contrast = 'CTV-1'
-res.plot.tot = rbind(res_il2.plot.tot,
-                     res_ctv.plot.tot)
-
-# Create the comparison dot plots for fold change with both IL2 and CTV-1
-res.plot.tot$Contrast = as.factor(res.plot.tot$Contrast)
-res.plot.tot$Method = factor(res.plot.tot$Method,
+# Create the comparison dot plot data
+ks_alone.plot.tot$Contrast = as.factor(ks_alone.plot.tot$Contrast)
+ks_alone.plot.tot$Method = factor(ks_alone.plot.tot$Method,
                              levels = c('Both','nSolver only','RUVSeq only'))
-res.plot.tot = res.plot.tot[order(res.plot.tot$Method,decreasing = T),]
+ks_alone.plot.tot = ks_alone.plot.tot[order(ks_alone.plot.tot$Method,decreasing = T),]
 
 ```
 
 ## Create the plot for comparing fold change between analysis methods
 
 ```{r fold_change_comparison_plot, message=FALSE, warning=FALSE}
-fc.plot = ggplot(data = res.plot.tot,
+fc.plot = ggplot(data = ks_alone.plot.tot,
                  aes(x = RUVFC, y = nSolverFC, color = Method)) + geom_point(aes(size = RUVSE)) +
   scale_color_manual(values = c("#4DAF4A","#377EB8","#E41A1C")) + 
   geom_hline(yintercept = 0,linetype = 2) +
