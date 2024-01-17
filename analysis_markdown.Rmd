@@ -27,10 +27,14 @@ library(limma)
 library(NanoStringNorm)
 library(readxl)
 
-setwd("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/Ramya_analysis_Dec2023")
+# The library in RSW to use is located at
+# /home/cauleyes/ccbr-data/renv_cache/ncounter_rna/Snapshot-environment_method/renv/library/R-4.1/x86_64-pc-linux-gnu
+
+# Set the working directory to your project folder if it is not set already
+setwd("/home/cauleyes/ccbr-data/users/Ned/nCounter_rna/CCBR1245_Ramaswami_nCounter")
 
 # Functions for RUVseq analysis
-source("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/R/nanostring_RUV_functions.R")
+source("R/nanostring_RUV_functions.R")
 
 # Load the annotation file
 annotation_file_path <- "ncounter_rna_annotation_edit.xlsx"
@@ -42,10 +46,10 @@ annotation_df <- read_excel(annotation_file_path)
 
 ```{r Initial Dataframes and QC,  message=FALSE, warning=FALSE}
 # Gather the names of the RCC files
-files.RCC = list.files("rcc")
+files.RCC = list.files("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc")
 files.RCC = files.RCC[grepl('RCC',files.RCC)]
 # Add name of sub folder containing RCC files
-rcc_folder <- "rcc"
+rcc_folder <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc"
 files.RCC <- file.path(rcc_folder, files.RCC)
 
 # Gather number of genes and samples
@@ -92,12 +96,15 @@ annotation_df$"SampleID" <- gsub("\\sSB", "SB", annotation_df$"SampleID")
 pData$"SampleID" <- gsub("-", " ", pData$"SampleID")
 pData$"SampleID" <- gsub("\\sSB", "SB", pData$"SampleID")
 
+# Rename and factor the KS alone field and sort by Yes or No
+#colnames(merged_pData)[colnames(merged_pData) == "KS alone"] <- "KS_alone"
+colnames(annotation_df)[colnames(annotation_df) == "CD4 count...9"] <- "CD4_group"
+
 # Combine all metadata into a single dataframe
 merged_pData <- merge(pData, annotation_df, by = "SampleID")
 
-# Rename and factor the KS alone field and sort by Yes or No
-colnames(merged_pData)[colnames(merged_pData) == "KS alone"] <- "KS_alone"
-merged_pData$KS_alone <- factor(merged_pData$'KS_alone', levels = c("Y", "N"))
+#merged_pData$KS_alone <- factor(merged_pData$'KS_alone', levels = c("Y", "N"))
+merged_pData$CD4_group <- factor(merged_pData$'CD4_group', levels = c("High", "Low"))
 
 # Create a feature df
 raw = raw_expression[,-c(1:2)]
@@ -133,7 +140,8 @@ pval = vector(length = nrow(hk_raw))
 # Run general linear model to get pvalue for housekeeping
 for (i in 1:nrow(hk_raw)){
   
-  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$KS_alone))
+  #reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$KS_alone))
+  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$CD4_group))
   pval[i] = coef(summary(reg))[2,4]
   
 }
@@ -166,16 +174,22 @@ i = 1
 results = paste0("cauley_deg_k",i,".csv")
 load(paste0("cauley_ruv_set_k_",i,".rda"))
 # DEseq Dataset
+#dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+                              #colData = pData(set),
+                              #design = ~ W_1 + KS_alone)
+
 dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                               colData = pData(set),
-                              design = ~ W_1 + KS_alone)
+                              design = ~ W_1 + CD4_group)
+
 # Run DEseq
 dds <- DESeq(dds)
 
 # Generate contrasts per group
-ks_alone_ruv <- as.data.frame(results(dds,contrast = c('KS_alone','Y','N')))
+#ks_alone_ruv <- as.data.frame(results(dds,contrast = c('KS_alone','Y','N')))
+contrast_ruv <- as.data.frame(results(dds,contrast = c('CD4_group','High','Low')))
 
-ks_alone_ruv_deg_list <- ks_alone_ruv[ks_alone_ruv$pvalue < 0.05, ]
+contrast_ruv_deg_list <- contrast_ruv[contrast_ruv$pvalue < 0.05, ]
 ```
 
 ## Run nSolver differential expression analysis 
@@ -183,9 +197,13 @@ ks_alone_ruv_deg_list <- ks_alone_ruv[ks_alone_ruv$pvalue < 0.05, ]
 
 ```{r, message=FALSE, warning=FALSE}
 # Set up the DEseq matrix for nsolver
+#dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+#                                      colData = pData(set),
+#                                      design = ~KS_alone)
+
 dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                                       colData = pData(set),
-                                      design = ~KS_alone)
+                                      design = ~CD4_group)
 
 pos = raw[grepl('POS',rownames(raw)),]
 
@@ -201,15 +219,21 @@ sizeFactors(dds.nsolver) <- pos.factors * hk.factors
 dds.nsolver <- DESeq(dds.nsolver)
 
 # Generate contrasts for each group for nSolver analysis
-ks_alone_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('KS_alone','Y','N')))
+#ks_alone_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('KS_alone','Y','N')))
+contrast_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('CD4_group','High','Low')))
 
-ks_alone_nsolver_deg_list <- ks_alone_nsolver[ks_alone_nsolver$pvalue < 0.05, ]
+#ks_alone_nsolver_deg_list <- ks_alone_nsolver[ks_alone_nsolver$pvalue < 0.05, ]
+contrast_nsolver_deg_list <- contrast_nsolver[contrast_nsolver$pvalue < 0.05, ]
 
 
 # Overlapping genes between the methods
-ks_alone_nsolver_deg_genes <- rownames(ks_alone_nsolver_deg_list)
-ks_alone_ruv_deg_genes <- rownames(ks_alone_ruv_deg_list)
-shared_gene_list <- intersect(ks_alone_nsolver_deg_genes, ks_alone_ruv_deg_genes)
+#ks_alone_nsolver_deg_genes <- rownames(ks_alone_nsolver_deg_list)
+#ks_alone_ruv_deg_genes <- rownames(ks_alone_ruv_deg_list)
+#shared_gene_list <- intersect(ks_alone_nsolver_deg_genes, ks_alone_ruv_deg_genes)
+
+contrast_nsolver_deg_genes <- rownames(contrast_nsolver_deg_list)
+contrast_ruv_deg_genes <- rownames(contrast_ruv_deg_list)
+shared_gene_list <- intersect(contrast_nsolver_deg_genes, contrast_ruv_deg_genes)
 
 ```
 
@@ -218,12 +242,19 @@ shared_gene_list <- intersect(ks_alone_nsolver_deg_genes, ks_alone_ruv_deg_genes
 ```{r pvalue_ruvseq_v_nsolver, message=FALSE, warning=FALSE}
 
 # Create comparison plots between RUVseq and nSolver analysis
-pval.plot.ks_alone = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(ks_alone_ruv)),
-                           P = c(ks_alone_nsolver$pvalue,ks_alone_ruv$pvalue))
-pval.plot.ks_alone$Contrast = 'KS_alone'
+#pval.plot.ks_alone = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(ks_alone_ruv)),
+#                           P = c(ks_alone_nsolver$pvalue,ks_alone_ruv$pvalue))
 
-pval.plot.ks_alone$Contrast = as.factor(pval.plot.ks_alone$Contrast)
-pvals = ggplot(data = pval.plot.ks_alone,
+pval.plot.contrast = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(contrast_ruv)),
+                           P = c(contrast_nsolver$pvalue,contrast_ruv$pvalue))
+
+#pval.plot.ks_alone$Contrast = 'KS_alone'
+pval.plot.contrast$Contrast = 'CD4_group'
+
+#pval.plot.ks_alone$Contrast = as.factor(pval.plot.ks_alone$Contrast)
+pval.plot.contrast$Contrast = as.factor(pval.plot.contrast$Contrast)
+
+pvals = ggplot(data = pval.plot.contrast,
                aes(x = P,color = Method,
                    fill = Method)) + geom_histogram(alpha = .2) +
   facet_wrap(~Contrast) + theme_minimal() +
@@ -252,27 +283,28 @@ print(pvals)
 # Create RUVseq vs. nSolver comparison plot for IL2
 
 # Gather stat sig DEGs from each method
-ks_alone_ruv_degs = subset(ks_alone_ruv,pvalue < 0.05)
-ks_alone_nsolver_degs = subset(ks_alone_nsolver,pvalue < 0.05)
-nrow(ks_alone_ruv_degs)
-nrow(ks_alone_nsolver_degs)
+contrast_ruv_degs = subset(contrast_ruv,pvalue < 0.05)
+contrast_nsolver_degs = subset(contrast_nsolver,pvalue < 0.05)
+nrow(contrast_ruv_degs)
+nrow(contrast_nsolver_degs)
 
 # Overlapping DEGs
-length(intersect(rownames(ks_alone_ruv_degs),rownames(ks_alone_nsolver_degs)))
-degs.both = intersect(rownames(ks_alone_ruv_degs),rownames(ks_alone_nsolver_degs))
+length(intersect(rownames(contrast_ruv_degs),rownames(contrast_nsolver_degs)))
+degs.both = intersect(rownames(contrast_ruv_degs),rownames(contrast_nsolver_degs))
 
 # Label DEGS from each method
-ks_alone_ruv_degs_unique = rownames(ks_alone_ruv_degs)[!(rownames(ks_alone_ruv_degs) %in% degs.both)]
-ks_alone_nsolver_degs_unique = rownames(ks_alone_nsolver_degs)[!(row.names(ks_alone_nsolver_degs) %in% degs.both)]
+contrast_ruv_degs_unique = rownames(contrast_ruv_degs)[!(rownames(contrast_ruv_degs) %in% degs.both)]
+contrast_nsolver_degs_unique = rownames(contrast_nsolver_degs)[!(row.names(contrast_nsolver_degs) %in% degs.both)]
 
 # Set up matrix for il2 comparison boxplot 
 boxplot.df = data.frame(Method = c(rep('Both',length(degs.both)),
-                                       rep('RUVSeq',length(ks_alone_ruv_degs_unique)),
-                                       rep('nSolver',length(ks_alone_nsolver_degs_unique))),
+                                       rep('RUVSeq',length(contrast_ruv_degs_unique)),
+                                       rep('nSolver',length(contrast_nsolver_degs_unique))),
                             Median = c(rowMedians(as.matrix(log2(raw[rownames(raw) %in% degs.both,]+1))),
-                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% ks_alone_ruv_degs_unique,]+1))),
-                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% ks_alone_nsolver_degs_unique,]+1)))))
-boxplot.df$Contrast = 'KS_alone'
+                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% contrast_ruv_degs_unique,]+1))),
+                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% contrast_nsolver_degs_unique,]+1)))))
+#boxplot.df$Contrast = 'KS_alone'
+boxplot.df$Contrast = 'CD4_group'
 
 # Run Nanostring normalization 
 colnames(raw_expression)[1:2] = c('Name','Code.Class')
@@ -326,38 +358,40 @@ print(boxplot)
 #res_il2.plot = subset(res_il2,rownames(res_il2) %in% c(il2.both,rownames(il2.nsolver),
 #                                                       rownames(il2.ruv)))
 
-ks_alone.plot = subset(ks_alone_ruv,rownames(ks_alone_ruv) %in% c(degs.both,rownames(ks_alone_nsolver_degs),
-                                                       rownames(ks_alone_ruv_degs)))
+contrast.plot = subset(contrast_ruv,rownames(contrast_ruv) %in% c(degs.both,rownames(contrast_nsolver_degs),
+                                                       rownames(contrast_ruv_degs)))
 
-ks_alone.nsolver.plot = subset(ks_alone_nsolver,
-                              rownames(ks_alone_ruv) %in% 
-                                c(degs.both,rownames(ks_alone_nsolver_degs),rownames(ks_alone_ruv_degs)))
+contrast.nsolver.plot = subset(contrast_nsolver,
+                              rownames(contrast_ruv) %in% 
+                                c(degs.both,rownames(contrast_nsolver_degs),rownames(contrast_ruv_degs)))
 
 # Matrix of fold change per method
-ks_alone.plot.tot = data.frame(Gene = rownames(ks_alone.plot),
-                              nSolverFC = ks_alone.nsolver.plot$log2FoldChange,
-                              nSolverSE = ks_alone.nsolver.plot$lfcSE,
-                              RUVFC = ks_alone.plot$log2FoldChange,
-                              RUVSE = ks_alone.plot$lfcSE)
+contrast.plot.tot = data.frame(Gene = rownames(contrast.plot),
+                              nSolverFC = contrast.nsolver.plot$log2FoldChange,
+                              nSolverSE = contrast.nsolver.plot$lfcSE,
+                              RUVFC = contrast.plot$log2FoldChange,
+                              RUVSE = contrast.plot$lfcSE)
 
 # Label fold change matrix
-ks_alone.plot.tot$Method = ifelse(ks_alone.plot.tot$Gene %in% degs.both,'Both',
-                                 ifelse(ks_alone.plot.tot$Gene %in% rownames(ks_alone_nsolver),
+contrast.plot.tot$Method = ifelse(contrast.plot.tot$Gene %in% degs.both,'Both',
+                                 ifelse(contrast.plot.tot$Gene %in% rownames(contrast_nsolver),
                                         'nSolver only','RUVSeq only'))
-ks_alone.plot.tot$Contrast = 'ks_alone'
+#contrast.plot.tot$Contrast = 'ks_alone'
+contrast.plot.tot$Contrast = 'CD4_group'
+
 
 # Create the comparison dot plot data
-ks_alone.plot.tot$Contrast = as.factor(ks_alone.plot.tot$Contrast)
-ks_alone.plot.tot$Method = factor(ks_alone.plot.tot$Method,
+contrast.plot.tot$Contrast = as.factor(contrast.plot.tot$Contrast)
+contrast.plot.tot$Method = factor(contrast.plot.tot$Method,
                              levels = c('Both','nSolver only','RUVSeq only'))
-ks_alone.plot.tot = ks_alone.plot.tot[order(ks_alone.plot.tot$Method,decreasing = T),]
+contrast.plot.tot = contrast.plot.tot[order(contrast.plot.tot$Method,decreasing = T),]
 
 ```
 
 ## Create the plot for comparing fold change between analysis methods
 
 ```{r fold_change_comparison_plot, message=FALSE, warning=FALSE}
-fc.plot = ggplot(data = ks_alone.plot.tot,
+fc.plot = ggplot(data = contrast.plot.tot,
                  aes(x = RUVFC, y = nSolverFC, color = Method)) + geom_point(aes(size = RUVSE)) +
   scale_color_manual(values = c("#4DAF4A","#377EB8","#E41A1C")) + 
   geom_hline(yintercept = 0,linetype = 2) +
