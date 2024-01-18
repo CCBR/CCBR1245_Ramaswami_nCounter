@@ -42,6 +42,18 @@ annotation_df <- read_excel(annotation_file_path)
 
 ```
 
+```{r Define the contrast for the DEG analysis, message=FALSE, warning=FALSE}
+
+# Define the contrast and levels from the annotation columns for QC and DEG analysis
+contrast <- "CD4_group"
+#contrast <- "KS_alone"
+
+contrast_levels <- c("High", "Low")
+#contrast_levels <- c("Y", "N")
+
+```
+
+
 ## Setup the initial dataframes with read counts and metadata/QC
 
 ```{r Initial Dataframes and QC,  message=FALSE, warning=FALSE}
@@ -97,14 +109,15 @@ pData$"SampleID" <- gsub("-", " ", pData$"SampleID")
 pData$"SampleID" <- gsub("\\sSB", "SB", pData$"SampleID")
 
 # Rename and factor the KS alone field and sort by Yes or No
-#colnames(merged_pData)[colnames(merged_pData) == "KS alone"] <- "KS_alone"
+colnames(annotation_df)[colnames(annotation_df) == "KS alone"] <- "KS_alone"
 colnames(annotation_df)[colnames(annotation_df) == "CD4 count...9"] <- "CD4_group"
 
 # Combine all metadata into a single dataframe
 merged_pData <- merge(pData, annotation_df, by = "SampleID")
 
 #merged_pData$KS_alone <- factor(merged_pData$'KS_alone', levels = c("Y", "N"))
-merged_pData$CD4_group <- factor(merged_pData$'CD4_group', levels = c("High", "Low"))
+#merged_pData$CD4_group <- factor(merged_pData$'CD4_group', levels = c("High", "Low"))
+merged_pData[[contrast]] <- factor(merged_pData[[contrast]], levels = contrast_levels)
 
 # Create a feature df
 raw = raw_expression[,-c(1:2)]
@@ -141,7 +154,8 @@ pval = vector(length = nrow(hk_raw))
 for (i in 1:nrow(hk_raw)){
   
   #reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$KS_alone))
-  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$CD4_group))
+  #reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$CD4_group))
+  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData[[contrast]]))
   pval[i] = coef(summary(reg))[2,4]
   
 }
@@ -178,18 +192,30 @@ load(paste0("cauley_ruv_set_k_",i,".rda"))
                               #colData = pData(set),
                               #design = ~ W_1 + KS_alone)
 
+#dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+                              #colData = pData(set),
+                              #design = ~ W_1 + CD4_group)
+
 dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                               colData = pData(set),
-                              design = ~ W_1 + CD4_group)
+                              design = as.formula(paste("~ W_1 +", contrast)))
 
 # Run DEseq
 dds <- DESeq(dds)
 
 # Generate contrasts per group
 #ks_alone_ruv <- as.data.frame(results(dds,contrast = c('KS_alone','Y','N')))
-contrast_ruv <- as.data.frame(results(dds,contrast = c('CD4_group','High','Low')))
+#contrast_ruv <- as.data.frame(results(dds,contrast = c('CD4_group','High','Low')))
+contrast_ruv <- as.data.frame(results(dds,contrast = c(contrast, contrast_levels)))
 
 contrast_ruv_deg_list <- contrast_ruv[contrast_ruv$pvalue < 0.05, ]
+
+# Reformat the DEG table to be exported
+ruv_deg_list_export <- contrast_ruv_deg_list
+ruv_deg_list_export$gene <- rownames(ruv_deg_list_export)
+rownames(ruv_deg_list_export) <- NULL
+ruv_deg_list_export <- ruv_deg_list_export[, c("gene", setdiff(names(ruv_deg_list_export), "gene"))]
+ruv_deg_list_export$normalization <- "RUVseq"
 ```
 
 ## Run nSolver differential expression analysis 
@@ -201,9 +227,13 @@ contrast_ruv_deg_list <- contrast_ruv[contrast_ruv$pvalue < 0.05, ]
 #                                      colData = pData(set),
 #                                      design = ~KS_alone)
 
+#dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+                                      #colData = pData(set),
+                                      #design = ~CD4_group)
+
 dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                                       colData = pData(set),
-                                      design = ~CD4_group)
+                                      as.formula(paste("~", contrast)))
 
 pos = raw[grepl('POS',rownames(raw)),]
 
@@ -219,14 +249,24 @@ sizeFactors(dds.nsolver) <- pos.factors * hk.factors
 dds.nsolver <- DESeq(dds.nsolver)
 
 # Generate contrasts for each group for nSolver analysis
+
 #ks_alone_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('KS_alone','Y','N')))
-contrast_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('CD4_group','High','Low')))
+#contrast_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('CD4_group','High','Low')))
+contrast_nsolver <- as.data.frame(results(dds.nsolver,contrast = c(contrast,contrast_levels)))
 
 #ks_alone_nsolver_deg_list <- ks_alone_nsolver[ks_alone_nsolver$pvalue < 0.05, ]
 contrast_nsolver_deg_list <- contrast_nsolver[contrast_nsolver$pvalue < 0.05, ]
 
+# Reformat the DEG table to be exported
+nsolver_deg_list_export <- contrast_nsolver_deg_list
+nsolver_deg_list_export$gene <- rownames(nsolver_deg_list_export)
+rownames(nsolver_deg_list_export) <- NULL
+nsolver_deg_list_export <- nsolver_deg_list_export[, c("gene", setdiff(names(nsolver_deg_list_export), "gene"))]
+nsolver_deg_list_export$normalization <- "nCounter"
+
 
 # Overlapping genes between the methods
+
 #ks_alone_nsolver_deg_genes <- rownames(ks_alone_nsolver_deg_list)
 #ks_alone_ruv_deg_genes <- rownames(ks_alone_ruv_deg_list)
 #shared_gene_list <- intersect(ks_alone_nsolver_deg_genes, ks_alone_ruv_deg_genes)
@@ -234,6 +274,16 @@ contrast_nsolver_deg_list <- contrast_nsolver[contrast_nsolver$pvalue < 0.05, ]
 contrast_nsolver_deg_genes <- rownames(contrast_nsolver_deg_list)
 contrast_ruv_deg_genes <- rownames(contrast_ruv_deg_list)
 shared_gene_list <- intersect(contrast_nsolver_deg_genes, contrast_ruv_deg_genes)
+
+# Create the total DEG list from each norm type for export
+
+combined_DEG_list_export <- rbind(ruv_deg_list_export, nsolver_deg_list_export)
+
+# Write out the DEG list, if desired
+export_DEG_list <- TRUE
+if(export_DEG_list == TRUE){
+  write.csv(combined_DEG_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
+}
 
 ```
 
@@ -249,7 +299,8 @@ pval.plot.contrast = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(c
                            P = c(contrast_nsolver$pvalue,contrast_ruv$pvalue))
 
 #pval.plot.ks_alone$Contrast = 'KS_alone'
-pval.plot.contrast$Contrast = 'CD4_group'
+#pval.plot.contrast$Contrast = 'CD4_group'
+pval.plot.contrast$Contrast = contrast
 
 #pval.plot.ks_alone$Contrast = as.factor(pval.plot.ks_alone$Contrast)
 pval.plot.contrast$Contrast = as.factor(pval.plot.contrast$Contrast)
@@ -273,6 +324,12 @@ pvals = ggplot(data = pval.plot.contrast,
   ylab('Count')
 
 print(pvals)
+
+# Export the plot, if desired
+export_pval_plot <- TRUE
+if(export_pval_plot == TRUE){
+  ggsave(paste0("Results/QC/pval_plot_",contrast,".pdf"), plot = pvals)
+}
 
 ```
 
@@ -304,7 +361,8 @@ boxplot.df = data.frame(Method = c(rep('Both',length(degs.both)),
                                        rowMedians(as.matrix(log2(raw[rownames(raw) %in% contrast_ruv_degs_unique,]+1))),
                                        rowMedians(as.matrix(log2(raw[rownames(raw) %in% contrast_nsolver_degs_unique,]+1)))))
 #boxplot.df$Contrast = 'KS_alone'
-boxplot.df$Contrast = 'CD4_group'
+#boxplot.df$Contrast = 'CD4_group'
+boxplot.df$Contrast = contrast
 
 # Run Nanostring normalization 
 colnames(raw_expression)[1:2] = c('Name','Code.Class')
@@ -346,6 +404,12 @@ boxplot = ggplot(data = boxplot.df,
 
 print(boxplot)
 
+# Export the plot, if desired
+export_boxplot_plot <- TRUE
+if(export_boxplot_plot == TRUE){
+  ggsave(paste0("Results/QC/boxplot_plot_",contrast,".pdf"), plot = boxplot)
+}
+
 ```
 
 # Set up the plot to compare log fold change
@@ -377,7 +441,8 @@ contrast.plot.tot$Method = ifelse(contrast.plot.tot$Gene %in% degs.both,'Both',
                                  ifelse(contrast.plot.tot$Gene %in% rownames(contrast_nsolver),
                                         'nSolver only','RUVSeq only'))
 #contrast.plot.tot$Contrast = 'ks_alone'
-contrast.plot.tot$Contrast = 'CD4_group'
+#contrast.plot.tot$Contrast = 'CD4_group'
+contrast.plot.tot$Contrast = contrast
 
 
 # Create the comparison dot plot data
@@ -411,5 +476,11 @@ fc.plot = ggplot(data = contrast.plot.tot,
   guides(colour = guide_legend(override.aes = list(size=4)))
 
 print(fc.plot)
+
+# Export the plot, if desired
+export_fc_plot <- TRUE
+if(export_fc_plot == TRUE){
+  ggsave(paste0("Results/QC/foldchange_plot_",contrast,".pdf"), plot = fc.plot)
+}
 
 ```
