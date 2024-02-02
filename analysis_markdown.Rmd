@@ -26,6 +26,7 @@ library(matrixStats)
 library(limma)
 library(NanoStringNorm)
 library(readxl)
+library(plotly)
 
 # The library in RSW to use is located at
 # /home/cauleyes/ccbr-data/renv_cache/ncounter_rna/Snapshot-environment_method/renv/library/R-4.1/x86_64-pc-linux-gnu
@@ -48,6 +49,8 @@ annotation_df <- read_excel(annotation_file_path)
 contrast <- "CD4_group"
 #contrast <- "KS_alone"
 
+# Levels are: Reference, Effect. 
+# This means a positive log2foldchnage = lower reference, higher effect
 contrast_levels <- c("High", "Low")
 #contrast_levels <- c("Y", "N")
 
@@ -62,10 +65,12 @@ files.RCC = list.files("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCB
 files.RCC = files.RCC[grepl('RCC',files.RCC)]
 # Add name of sub folder containing RCC files
 rcc_folder <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc"
-files.RCC <- file.path(rcc_folder, files.RCC)
+#files.RCC <- file.path(rcc_folder, files.RCC)
 
 # Gather number of genes and samples
-genes.count = nrow(readRcc(files.RCC[1])$Code_Summary)
+rcc.example.file <- file.path(rcc_folder, files.RCC[1])
+#genes.count = nrow(readRcc(file.path(rcc_folder, files.RCC[1])$Code_Summary))
+genes.count = nrow(readRcc(rcc.example.file)$Code_Summary)
 ncol = length(files.RCC)
 
 # Set up the dataframe to hold all sample and gene data
@@ -78,18 +83,19 @@ colnames(pData) = c('BCAC_ID','SampleID','Owner','Comments','Date','GeneRLF','Sy
                     'bindingDensityQC','limitOfDetectionQC','positiveLinearityQC')
 
 # Populate gene and class columns of expression df
-raw_expression[,1:2] = readRcc(files.RCC[1])$Code_Summary[,c(2,1)]
+raw_expression[,1:2] = readRcc(rcc.example.file)$Code_Summary[,c(2,1)]
 
 print("RCC files to be processed:")
 # Populate expression df, run QC, and record flags for each sample
 for (i in 1:length(files.RCC)){
   
   print(files.RCC[i])
-  rcc = readRcc(files.RCC[i])
+  rcc.path <- file.path(rcc_folder, files.RCC[i])
+  rcc = readRcc(rcc.path)
   raw = rcc$Code_Summary
   
   raw_expression[,i+2] = as.numeric(raw$Count)
-  colnames(raw_expression)[i+2] = strsplit(files.RCC[i],'_')[[1]][1]
+  colnames(raw_expression)[i+2] = strsplit(files.RCC[i],'_')[[1]][3]
   pData[i,2:7] = as.vector(rcc$Sample_Attributes)
   pData$imagingQC[i] = imagingQC(rcc)
   pData$bindingDensityQC[i] = bindingDensityQC(rcc,.05,2.25)
@@ -102,9 +108,9 @@ for (i in 1:length(files.RCC)){
 # Correct for annotation
 colnames(annotation_df)[4] <- "SampleID"
 annotation_df$"SampleID" <- gsub("-", " ", annotation_df$"SampleID")
-# Correct for pdata
-annotation_df$"SampleID" <- gsub("-", " ", annotation_df$"SampleID")
 annotation_df$"SampleID" <- gsub("\\sSB", "SB", annotation_df$"SampleID")
+
+# Correct for pdata
 pData$"SampleID" <- gsub("-", " ", pData$"SampleID")
 pData$"SampleID" <- gsub("\\sSB", "SB", pData$"SampleID")
 
@@ -115,22 +121,43 @@ colnames(annotation_df)[colnames(annotation_df) == "CD4 count...9"] <- "CD4_grou
 # Combine all metadata into a single dataframe
 merged_pData <- merge(pData, annotation_df, by = "SampleID")
 
-#merged_pData$KS_alone <- factor(merged_pData$'KS_alone', levels = c("Y", "N"))
-#merged_pData$CD4_group <- factor(merged_pData$'CD4_group', levels = c("High", "Low"))
 merged_pData[[contrast]] <- factor(merged_pData[[contrast]], levels = contrast_levels)
 
 # Create a feature df
 raw = raw_expression[,-c(1:2)]
 fData = raw_expression[,c(1:2)]
 rownames(raw) = fData$Gene
+
+# Correct the Sample ID column names for preceding spaces and hyphens
+colnames(raw) <- gsub("^\\s+", "", colnames(raw))
+colnames(raw) <- gsub("-", " ", colnames(raw))
+
+
+# List the information for the feature data frame
+str(fData)
+count_endog <- sum(fData$Class == "Endogenous")
+count_neg <- sum(fData$Class == "Negative")
+count_pos <- sum(fData$Class == "Positive")
+count_hk <- sum(fData$Class == "Housekeeping")
+
+print(paste0("Endogenous genes: ",count_endog))
+print(paste0("Negative genes: ",count_neg))
+print(paste0("Positive genes: ",count_pos))
+print(paste0("Housekeeping geness: ",count_hk))
+
 # List the housekeeping genes and label in the fData df
 cIdx <- fData$Gene[fData$Class == "Housekeeping"]
+
+# Identify missing housekeeping genes in any samples
 merged_pData$HK_Gene_Miss = colSums(raw[cIdx,] == 0)
 
-# Sync all of the rownames of the three dfs
+# Estbalish all of the rownames of the three dfs
 rownames(fData) = fData$Gene
 rownames(raw) = fData$Gene
-rownames(merged_pData) = colnames(raw)
+rownames(merged_pData) <- merged_pData$SampleID
+
+# Ensure the order of the SampleID columns in the expression data frame match the order of the rows in the metadata
+raw_reorder <- raw[, rownames(merged_pData)]
 
 print("Initial data frames")
 head(raw_expression)
@@ -147,14 +174,12 @@ head(fData)
 ###
 
 # Gather the read counts for housekeeping genes
-hk_raw = raw[cIdx,]
+hk_raw = raw_reorder[cIdx,]
 pval = vector(length = nrow(hk_raw))
 
 # Run general linear model to get pvalue for housekeeping
 for (i in 1:nrow(hk_raw)){
   
-  #reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$KS_alone))
-  #reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData$CD4_group))
   reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData[[contrast]]))
   pval[i] = coef(summary(reg))[2,4]
   
@@ -174,9 +199,9 @@ sum(pval <= .05)
 ```{r, message=FALSE, warning=FALSE}
 k = 1
 # DEseq transform for RUVseq
-vsd = RUV_total(raw,merged_pData,fData,k = k)$vsd
+vsd = RUV_total(raw_reorder,merged_pData,fData,k = k)$vsd
 # Set Expression Set
-set = RUV_total(raw,merged_pData,fData,k = k)$set
+set = RUV_total(raw_reorder,merged_pData,fData,k = k)$set
 
 # Save the results
 save(vsd,file = paste0("cauley_ruv_vsd_k_",k,".rda"))
@@ -188,14 +213,6 @@ i = 1
 results = paste0("cauley_deg_k",i,".csv")
 load(paste0("cauley_ruv_set_k_",i,".rda"))
 # DEseq Dataset
-#dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
-                              #colData = pData(set),
-                              #design = ~ W_1 + KS_alone)
-
-#dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
-                              #colData = pData(set),
-                              #design = ~ W_1 + CD4_group)
-
 dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                               colData = pData(set),
                               design = as.formula(paste("~ W_1 +", contrast)))
@@ -204,8 +221,6 @@ dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
 dds <- DESeq(dds)
 
 # Generate contrasts per group
-#ks_alone_ruv <- as.data.frame(results(dds,contrast = c('KS_alone','Y','N')))
-#contrast_ruv <- as.data.frame(results(dds,contrast = c('CD4_group','High','Low')))
 contrast_ruv <- as.data.frame(results(dds,contrast = c(contrast, contrast_levels)))
 
 contrast_ruv_deg_list <- contrast_ruv[contrast_ruv$pvalue < 0.05, ]
@@ -223,22 +238,14 @@ ruv_deg_list_export$normalization <- "RUVseq"
 
 ```{r, message=FALSE, warning=FALSE}
 # Set up the DEseq matrix for nsolver
-#dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
-#                                      colData = pData(set),
-#                                      design = ~KS_alone)
-
-#dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
-                                      #colData = pData(set),
-                                      #design = ~CD4_group)
-
 dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                                       colData = pData(set),
                                       as.formula(paste("~", contrast)))
 
-pos = raw[grepl('POS',rownames(raw)),]
+pos = raw_reorder[grepl('POS',rownames(raw_reorder)),]
 
 # Housekeeping genes expression
-hk = raw[grepl('Housekeeping',raw_expression$Class),]
+hk = raw_reorder[grepl('Housekeeping',raw_expression$Class),]
 
 # Set up nSolver
 pos.factors = mean(as.numeric(apply(pos,2,geoMean)))/as.numeric(apply(pos,2,geoMean))
@@ -249,12 +256,8 @@ sizeFactors(dds.nsolver) <- pos.factors * hk.factors
 dds.nsolver <- DESeq(dds.nsolver)
 
 # Generate contrasts for each group for nSolver analysis
-
-#ks_alone_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('KS_alone','Y','N')))
-#contrast_nsolver <- as.data.frame(results(dds.nsolver,contrast = c('CD4_group','High','Low')))
 contrast_nsolver <- as.data.frame(results(dds.nsolver,contrast = c(contrast,contrast_levels)))
 
-#ks_alone_nsolver_deg_list <- ks_alone_nsolver[ks_alone_nsolver$pvalue < 0.05, ]
 contrast_nsolver_deg_list <- contrast_nsolver[contrast_nsolver$pvalue < 0.05, ]
 
 # Reformat the DEG table to be exported
@@ -266,10 +269,6 @@ nsolver_deg_list_export$normalization <- "nCounter"
 
 
 # Overlapping genes between the methods
-
-#ks_alone_nsolver_deg_genes <- rownames(ks_alone_nsolver_deg_list)
-#ks_alone_ruv_deg_genes <- rownames(ks_alone_ruv_deg_list)
-#shared_gene_list <- intersect(ks_alone_nsolver_deg_genes, ks_alone_ruv_deg_genes)
 
 contrast_nsolver_deg_genes <- rownames(contrast_nsolver_deg_list)
 contrast_ruv_deg_genes <- rownames(contrast_ruv_deg_list)
@@ -292,17 +291,11 @@ if(export_DEG_list == TRUE){
 ```{r pvalue_ruvseq_v_nsolver, message=FALSE, warning=FALSE}
 
 # Create comparison plots between RUVseq and nSolver analysis
-#pval.plot.ks_alone = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(ks_alone_ruv)),
-#                           P = c(ks_alone_nsolver$pvalue,ks_alone_ruv$pvalue))
-
 pval.plot.contrast = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(contrast_ruv)),
                            P = c(contrast_nsolver$pvalue,contrast_ruv$pvalue))
 
-#pval.plot.ks_alone$Contrast = 'KS_alone'
-#pval.plot.contrast$Contrast = 'CD4_group'
 pval.plot.contrast$Contrast = contrast
 
-#pval.plot.ks_alone$Contrast = as.factor(pval.plot.ks_alone$Contrast)
 pval.plot.contrast$Contrast = as.factor(pval.plot.contrast$Contrast)
 
 pvals = ggplot(data = pval.plot.contrast,
@@ -357,9 +350,9 @@ contrast_nsolver_degs_unique = rownames(contrast_nsolver_degs)[!(row.names(contr
 boxplot.df = data.frame(Method = c(rep('Both',length(degs.both)),
                                        rep('RUVSeq',length(contrast_ruv_degs_unique)),
                                        rep('nSolver',length(contrast_nsolver_degs_unique))),
-                            Median = c(rowMedians(as.matrix(log2(raw[rownames(raw) %in% degs.both,]+1))),
-                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% contrast_ruv_degs_unique,]+1))),
-                                       rowMedians(as.matrix(log2(raw[rownames(raw) %in% contrast_nsolver_degs_unique,]+1)))))
+                            Median = c(rowMedians(as.matrix(log2(raw_reorder[rownames(raw_reorder) %in% degs.both,]+1))),
+                                       rowMedians(as.matrix(log2(raw_reorder[rownames(raw_reorder) %in% contrast_ruv_degs_unique,]+1))),
+                                       rowMedians(as.matrix(log2(raw_reorder[rownames(raw_reorder) %in% contrast_nsolver_degs_unique,]+1)))))
 #boxplot.df$Contrast = 'KS_alone'
 #boxplot.df$Contrast = 'CD4_group'
 boxplot.df$Contrast = contrast
@@ -438,7 +431,7 @@ contrast.plot.tot = data.frame(Gene = rownames(contrast.plot),
 
 # Label fold change matrix
 contrast.plot.tot$Method = ifelse(contrast.plot.tot$Gene %in% degs.both,'Both',
-                                 ifelse(contrast.plot.tot$Gene %in% rownames(contrast_nsolver),
+                                 ifelse(contrast.plot.tot$Gene %in% rownames(contrast_nsolver_degs),
                                         'nSolver only','RUVSeq only'))
 #contrast.plot.tot$Contrast = 'ks_alone'
 #contrast.plot.tot$Contrast = 'CD4_group'
@@ -457,16 +450,16 @@ contrast.plot.tot = contrast.plot.tot[order(contrast.plot.tot$Method,decreasing 
 
 ```{r fold_change_comparison_plot, message=FALSE, warning=FALSE}
 fc.plot = ggplot(data = contrast.plot.tot,
-                 aes(x = RUVFC, y = nSolverFC, color = Method)) + geom_point(aes(size = RUVSE)) +
+                 aes(x = RUVFC, y = nSolverFC, color = Method, text = Gene)) + geom_point(aes(size = RUVSE), alpha = 0.5) +
   scale_color_manual(values = c("#4DAF4A","#377EB8","#E41A1C")) + 
   geom_hline(yintercept = 0,linetype = 2) +
   geom_vline(xintercept = 0,linetype = 2) +  theme_minimal() +
   theme(axis.text=element_text(size=12),
-        axis.title=element_text(size=24),
-        plot.title = element_text(size = 30),
-        legend.title=element_text(size=20),
-        legend.text=element_text(size=20),
-        strip.text = element_text(size=24),
+        axis.title=element_text(size=10),
+        plot.title = element_text(size = 10),
+        legend.title=element_text(size=10),
+        legend.text=element_text(size=10),
+        strip.text = element_text(size=10),
         panel.spacing=unit(1, "lines"),
         panel.border = element_rect(color = "grey", 
                                     fill = NA, size = .1),
@@ -475,12 +468,54 @@ fc.plot = ggplot(data = contrast.plot.tot,
   labs(size = 'SE (RUVSeq)') + geom_abline(slope = 1,intercept = 0,linetype = 2, color='grey') +
   guides(colour = guide_legend(override.aes = list(size=4)))
 
-print(fc.plot)
+#print(fc.plot)
+
+fc.plotly <- ggplotly(fc.plot, tooltip = "text")
+
+# Print the plot
+print(fc.plotly)
 
 # Export the plot, if desired
-export_fc_plot <- TRUE
+export_fc_plot <- FALSE
 if(export_fc_plot == TRUE){
   ggsave(paste0("Results/QC/foldchange_plot_",contrast,".pdf"), plot = fc.plot)
 }
+
+```
+# Get the read count information for CXCL8
+
+``` {r}
+
+normalized_CXCL8 <- set@assayData$counts[rownames(set@assayData$counts) == "CXCL8", ]
+
+
+CXCL8_df <- data.frame(CXCL8_normalized = normalized_CXCL8, SampleID = names(normalized_CXCL8))
+rownames(CXCL8_df) = NULL
+
+CXCL8_anno_columns <- c("SampleID","KS_alone","CD4_group")
+subset_anno_df <- annotation_df[CXCL8_anno_columns]
+
+
+CXCL8_df <- merge(CXCL8_df, subset_anno_df, by = "SampleID")
+
+CXCL8_mean_KS_Y <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$KS_alone == "Y"], na.rm = TRUE)
+CXCL8_mean_KS_N <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$KS_alone == "N"], na.rm = TRUE)
+
+CXCL8_df$KS_alone_mean <- ifelse(CXCL8_df$KS_alone == "Y", CXCL8_mean_KS_Y, CXCL8_mean_KS_N)
+
+CXCL8_mean_CD4_High <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$CD4_group == "High"], na.rm = TRUE)
+CXCL8_mean_CD4_Low <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$CD4_group == "Low"], na.rm = TRUE)
+
+CXCL8_df$CD4_group_mean <- ifelse(CXCL8_df$CD4_group == "High", CXCL8_mean_CD4_High, CXCL8_mean_CD4_Low)
+
+
+
+CXCL8_deg <- ruv_deg_list_export[ruv_deg_list_export$gene == "CXCL8", ]
+
+export_CXCL8_summary <- TRUE
+if(export_CXCL8_summary == TRUE){
+  write.csv(CXCL8_df, file = "Results/CXCL8_summary.csv", row.names = FALSE)
+}
+
 
 ```
