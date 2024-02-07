@@ -47,14 +47,14 @@ annotation_df <- read_excel(annotation_file_path)
 
 # Define the contrast and levels from the annotation columns for QC and DEG analysis
 #contrast <- "CD4_group"
-#contrast <- "KS_alone"
-contrast <- "KSHV_VL_Bin"
+contrast <- "KS_alone"
+#contrast <- "KSHV_VL_Bin"
 
 # Levels are: Reference, Effect. 
 # This means a positive log2foldchnage = lower reference, higher effect
 #contrast_levels <- c("High", "Low")
-#contrast_levels <- c("Y", "N")
-contrast_levels <- c("0", "1")
+contrast_levels <- c("Y", "N")
+#contrast_levels <- c("0", "1")
 
 ```
 
@@ -324,9 +324,17 @@ shared_gene_list <- intersect(contrast_nsolver_deg_genes, contrast_ruv_deg_genes
 combined_DEG_list_export <- rbind(ruv_deg_list_export, nsolver_deg_list_export)
 
 # Write out the DEG list, if desired
-export_DEG_list <- FALSE
-if(export_DEG_list == TRUE){
+
+# Only significant
+export_sig_DEG_list <- FALSE
+if(export_sig_DEG_list == TRUE){
   write.csv(combined_DEG_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
+}
+
+# All results
+export_all_DEG_list <- FALSE
+if(export_all_DEG_list == TRUE){
+  write.csv(contrast_ruv, file = paste0("Results/DEG/all_DEG_results_",contrast,".csv"), row.names = TRUE)
 }
 
 ```
