@@ -6,7 +6,7 @@ output: html_document
 ---
 
 # This markdown and analysis based on https://github.com/bhattacharya-a-bt/CBCS_normalization/blob/master/sabry_analysis.R
-# The above analysis is form the publication https://academic.oup.com/bib/article/22/3/bbaa163/5891144?login=true
+# The above analysis is from the publication https://academic.oup.com/bib/article/22/3/bbaa163/5891144?login=true
 
 ```{r setup}
 knitr::opts_chunk$set(echo = TRUE)
@@ -38,7 +38,7 @@ setwd("/home/cauleyes/ccbr-data/users/Ned/nCounter_rna/CCBR1245_Ramaswami_nCount
 source("R/nanostring_RUV_functions.R")
 
 # Load the annotation file
-annotation_file_path <- "ncounter_rna_annotation_edit.xlsx"
+annotation_file_path <- "ncounter_rna_annotation_edit_RR_Feb2024.xlsx"
 annotation_df <- read_excel(annotation_file_path)
 
 ```
@@ -46,13 +46,15 @@ annotation_df <- read_excel(annotation_file_path)
 ```{r Define the contrast for the DEG analysis, message=FALSE, warning=FALSE}
 
 # Define the contrast and levels from the annotation columns for QC and DEG analysis
-contrast <- "CD4_group"
+#contrast <- "CD4_group"
 #contrast <- "KS_alone"
+contrast <- "KSHV_VL_Bin"
 
 # Levels are: Reference, Effect. 
 # This means a positive log2foldchnage = lower reference, higher effect
-contrast_levels <- c("High", "Low")
+#contrast_levels <- c("High", "Low")
 #contrast_levels <- c("Y", "N")
+contrast_levels <- c("0", "1")
 
 ```
 
@@ -116,7 +118,8 @@ pData$"SampleID" <- gsub("\\sSB", "SB", pData$"SampleID")
 
 # Rename and factor the KS alone field and sort by Yes or No
 colnames(annotation_df)[colnames(annotation_df) == "KS alone"] <- "KS_alone"
-colnames(annotation_df)[colnames(annotation_df) == "CD4 count...9"] <- "CD4_group"
+colnames(annotation_df)[colnames(annotation_df) == "CD4 count...11"] <- "CD4_group"
+colnames(annotation_df)[colnames(annotation_df) == "KSHV VL Bin"] <- "KSHV_VL_Bin"
 
 # Combine all metadata into a single dataframe
 merged_pData <- merge(pData, annotation_df, by = "SampleID")
@@ -197,11 +200,35 @@ sum(pval <= .05)
 ## Run RUVseq differential expression analysis
 
 ```{r, message=FALSE, warning=FALSE}
+
+
+# Number of sources of variance to identify with RUVseq
 k = 1
+
+# Remove samples with NA from the read counts dataframe
+NA_rows <- which(!complete.cases(merged_pData[[contrast]]))
+NA_samples <- rownames(merged_pData[NA_rows, ])
+
+if(length(NA_rows) > 0){
+  raw_reorder <- raw_reorder[, -which(names(raw_reorder) %in% NA_samples)]
+}
+
+
+
+# Remove sample with NA from the annotation
+if(length(NA_rows) > 0){
+  merged_pData <- merged_pData[complete.cases(merged_pData[[contrast]]), ]
+}
+
+
+
 # DEseq transform for RUVseq
 vsd = RUV_total(raw_reorder,merged_pData,fData,k = k)$vsd
 # Set Expression Set
 set = RUV_total(raw_reorder,merged_pData,fData,k = k)$set
+
+# Remove row of the contrast that contain NA values
+set <- set[complete.cases(pData(set)$KSHV_VL_Bin), ]
 
 # Save the results
 save(vsd,file = paste0("cauley_ruv_vsd_k_",k,".rda"))
@@ -215,7 +242,7 @@ load(paste0("cauley_ruv_set_k_",i,".rda"))
 # DEseq Dataset
 dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                               colData = pData(set),
-                              design = as.formula(paste("~ W_1 +", contrast)))
+                              design = as.formula(paste("~ W_1 + Date +", contrast)))
 
 # Run DEseq
 dds <- DESeq(dds)
@@ -231,6 +258,24 @@ ruv_deg_list_export$gene <- rownames(ruv_deg_list_export)
 rownames(ruv_deg_list_export) <- NULL
 ruv_deg_list_export <- ruv_deg_list_export[, c("gene", setdiff(names(ruv_deg_list_export), "gene"))]
 ruv_deg_list_export$normalization <- "RUVseq"
+
+
+# Export Normalized read counts
+export_norm_counts <- FALSE
+if(export_norm_counts == TRUE){
+  # Grab the normalized_counts
+  normalized_counts <- as.data.frame(counts(dds, normalized = TRUE))
+  
+  # Add a gene column
+  gene <- rownames(normalized_counts)
+  normalized_counts <- cbind(gene_list, normalized_counts) 
+  
+  # Export
+  write.csv(normalized_counts, file = paste0("Results/RUV_normalized_counts.csv"), row.names = FALSE)
+  
+  
+}
+
 ```
 
 ## Run nSolver differential expression analysis 
@@ -279,7 +324,7 @@ shared_gene_list <- intersect(contrast_nsolver_deg_genes, contrast_ruv_deg_genes
 combined_DEG_list_export <- rbind(ruv_deg_list_export, nsolver_deg_list_export)
 
 # Write out the DEG list, if desired
-export_DEG_list <- TRUE
+export_DEG_list <- FALSE
 if(export_DEG_list == TRUE){
   write.csv(combined_DEG_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
 }
@@ -319,7 +364,7 @@ pvals = ggplot(data = pval.plot.contrast,
 print(pvals)
 
 # Export the plot, if desired
-export_pval_plot <- TRUE
+export_pval_plot <- FALSE
 if(export_pval_plot == TRUE){
   ggsave(paste0("Results/QC/pval_plot_",contrast,".pdf"), plot = pvals)
 }
@@ -398,7 +443,7 @@ boxplot = ggplot(data = boxplot.df,
 print(boxplot)
 
 # Export the plot, if desired
-export_boxplot_plot <- TRUE
+export_boxplot_plot <- FALSE
 if(export_boxplot_plot == TRUE){
   ggsave(paste0("Results/QC/boxplot_plot_",contrast,".pdf"), plot = boxplot)
 }
@@ -512,7 +557,7 @@ CXCL8_df$CD4_group_mean <- ifelse(CXCL8_df$CD4_group == "High", CXCL8_mean_CD4_H
 
 CXCL8_deg <- ruv_deg_list_export[ruv_deg_list_export$gene == "CXCL8", ]
 
-export_CXCL8_summary <- TRUE
+export_CXCL8_summary <- FALSE
 if(export_CXCL8_summary == TRUE){
   write.csv(CXCL8_df, file = "Results/CXCL8_summary.csv", row.names = FALSE)
 }
