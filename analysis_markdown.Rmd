@@ -289,6 +289,31 @@ if(export_norm_counts == TRUE){
   
 }
 
+# Plot PCA to check for batch effects
+
+# Prepare the counts
+rlog_dds <- rlog(dds)
+
+# Annotation to view PCA by
+PCA.group <- "Date"
+
+# PCA Plot
+PCA.plot <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 50)
+
+# Plotly PCA for interactivity
+PCA.plot.data <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 50, returnData = TRUE)
+PCA.plotly <- plot_ly(data = PCA.plot.data, x = ~PC1, y = ~PC2, text = ~name, mode = "markers", color = ~factor(group)) %>%
+  layout(title = "PCA Plot",
+         xaxis = list(title = "PC1"),
+         yaxis = list(title = "PC2"))
+
+# Export the PCA plot
+
+export.PCA <- TRUE
+if(export.PCA == TRUE){
+  ggsave(paste0("Results/QC/PCA.pdf"), plot = pvals)
+}
+
 ```
 
 ## Run nSolver differential expression analysis 
