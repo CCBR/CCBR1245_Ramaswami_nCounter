@@ -38,7 +38,7 @@ setwd("/home/cauleyes/ccbr-data/users/Ned/nCounter_rna/CCBR1245_Ramaswami_nCount
 source("R/nanostring_RUV_functions.R")
 
 # Load the annotation file
-annotation_file_path <- "ncounter_rna_annotation_edit_RR_Feb2024.xlsx"
+annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
 annotation_df <- read_excel(annotation_file_path)
 
 ```
@@ -274,14 +274,14 @@ ruv_deg_list_export$normalization <- "RUVseq"
 
 
 # Export Normalized read counts
-export_norm_counts <- FALSE
+export_norm_counts <- TRUE
 if(export_norm_counts == TRUE){
   # Grab the normalized_counts
   normalized_counts <- as.data.frame(counts(dds, normalized = TRUE))
   
   # Add a gene column
   gene <- rownames(normalized_counts)
-  normalized_counts <- cbind(gene_list, normalized_counts) 
+  normalized_counts <- cbind(gene, normalized_counts) 
   
   # Export
   write.csv(normalized_counts, file = paste0("Results/RUV_normalized_counts.csv"), row.names = FALSE)
@@ -307,11 +307,13 @@ PCA.plotly <- plot_ly(data = PCA.plot.data, x = ~PC1, y = ~PC2, text = ~name, mo
          xaxis = list(title = "PC1"),
          yaxis = list(title = "PC2"))
 
+print(PCA.plotly)
+
 # Export the PCA plot
 
 export.PCA <- TRUE
 if(export.PCA == TRUE){
-  ggsave(paste0("Results/QC/PCA.pdf"), plot = pvals)
+  ggsave(paste0("Results/QC/PCA.pdf"), plot = PCA.plot)
 }
 
 ```
@@ -410,7 +412,7 @@ pvals = ggplot(data = pval.plot.contrast,
 print(pvals)
 
 # Export the plot, if desired
-export_pval_plot <- FALSE
+export_pval_plot <- TRUE
 if(export_pval_plot == TRUE){
   ggsave(paste0("Results/QC/pval_plot_",contrast,".pdf"), plot = pvals)
 }
@@ -489,7 +491,7 @@ boxplot = ggplot(data = boxplot.df,
 print(boxplot)
 
 # Export the plot, if desired
-export_boxplot_plot <- FALSE
+export_boxplot_plot <- TRUE
 if(export_boxplot_plot == TRUE){
   ggsave(paste0("Results/QC/boxplot_plot_",contrast,".pdf"), plot = boxplot)
 }
@@ -567,7 +569,7 @@ fc.plotly <- ggplotly(fc.plot, tooltip = "text")
 print(fc.plotly)
 
 # Export the plot, if desired
-export_fc_plot <- FALSE
+export_fc_plot <- TRUE
 if(export_fc_plot == TRUE){
   ggsave(paste0("Results/QC/foldchange_plot_",contrast,".pdf"), plot = fc.plot)
 }
@@ -603,7 +605,7 @@ CXCL8_df$CD4_group_mean <- ifelse(CXCL8_df$CD4_group == "High", CXCL8_mean_CD4_H
 
 CXCL8_deg <- ruv_deg_list_export[ruv_deg_list_export$gene == "CXCL8", ]
 
-export_CXCL8_summary <- FALSE
+export_CXCL8_summary <- TRUE
 if(export_CXCL8_summary == TRUE){
   write.csv(CXCL8_df, file = "Results/CXCL8_summary.csv", row.names = FALSE)
 }
