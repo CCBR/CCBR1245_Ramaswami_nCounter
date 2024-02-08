@@ -162,9 +162,22 @@ rownames(merged_pData) <- merged_pData$SampleID
 # Ensure the order of the SampleID columns in the expression data frame match the order of the rows in the metadata
 raw_reorder <- raw[, rownames(merged_pData)]
 
+# Remove outlier sample
+remove_outlier <- FALSE
+if(remove_outlier == TRUE){
+  
+  outlier <- "SB 19 5920"
+  
+  # Remove from annotation
+  merged_pData <- merged_pData[merged_pData$SampleID != outlier, ]
+  
+  # Remove from counts
+  raw_reorder <- raw_reorder[, !names(raw_reorder) %in% outlier]
+}
+
 print("Initial data frames")
-head(raw_expression)
-head(pData)
+head(raw_reorder)
+head(merged_pData)
 head(fData)
 
 ```
@@ -242,7 +255,7 @@ load(paste0("cauley_ruv_set_k_",i,".rda"))
 # DEseq Dataset
 dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                               colData = pData(set),
-                              design = as.formula(paste("~ W_1 + Date +", contrast)))
+                              design = as.formula(paste("~ W_1 + Date + ", contrast)))
 
 # Run DEseq
 dds <- DESeq(dds)
@@ -326,13 +339,13 @@ combined_DEG_list_export <- rbind(ruv_deg_list_export, nsolver_deg_list_export)
 # Write out the DEG list, if desired
 
 # Only significant
-export_sig_DEG_list <- FALSE
+export_sig_DEG_list <- TRUE
 if(export_sig_DEG_list == TRUE){
   write.csv(combined_DEG_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
 }
 
 # All results
-export_all_DEG_list <- FALSE
+export_all_DEG_list <- TRUE
 if(export_all_DEG_list == TRUE){
   write.csv(contrast_ruv, file = paste0("Results/DEG/all_DEG_results_",contrast,".csv"), row.names = TRUE)
 }
