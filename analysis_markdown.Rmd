@@ -27,6 +27,7 @@ library(limma)
 library(NanoStringNorm)
 library(readxl)
 library(plotly)
+library(pheatmap)
 
 # The library in RSW to use is located at
 # /home/cauleyes/ccbr-data/renv_cache/ncounter_rna/Snapshot-environment_method/renv/library/R-4.1/x86_64-pc-linux-gnu
@@ -46,14 +47,14 @@ annotation_df <- read_excel(annotation_file_path)
 ```{r Define the contrast for the DEG analysis, message=FALSE, warning=FALSE}
 
 # Define the contrast and levels from the annotation columns for QC and DEG analysis
-#contrast <- "CD4_group"
-contrast <- "KS_alone"
+contrast <- "CD4_group"
+#contrast <- "KS_alone"
 #contrast <- "KSHV_VL_Bin"
 
 # Levels are: Reference, Effect. 
 # This means a positive log2foldchnage = lower reference, higher effect
-#contrast_levels <- c("High", "Low")
-contrast_levels <- c("Y", "N")
+contrast_levels <- c("High", "Low")
+#contrast_levels <- c("Y", "N")
 #contrast_levels <- c("0", "1")
 
 ```
@@ -100,10 +101,13 @@ for (i in 1:length(files.RCC)){
   colnames(raw_expression)[i+2] = strsplit(files.RCC[i],'_')[[1]][3]
   pData[i,2:7] = as.vector(rcc$Sample_Attributes)
   pData$imagingQC[i] = imagingQC(rcc)
+  pData$imaging[i] <-  as.numeric(rcc$Lane_Attributes[3])
   pData$bindingDensityQC[i] = bindingDensityQC(rcc,.05,2.25)
+  pData$bindingDensity[i] <- as.numeric(rcc$Lane_Attributes[6])
   pData$limitOfDetectionQC[i] = limitOfDetectionQC(rcc)
+  pData$limitOfDetection[i] <- limitOfDetectionScore(rcc)
   pData$positiveLinearityQC[i] = positiveLinQC(rcc)
-  
+  pData$positiveLinearityQC[i] <- positiveLinScore(rcc)
 }
 
 # Correct the sample ID column name and sample name IDs
@@ -253,9 +257,21 @@ i = 1
 results = paste0("cauley_deg_k",i,".csv")
 load(paste0("cauley_ruv_set_k_",i,".rda"))
 # DEseq Dataset
-dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+
+# Should date of the experiment be used as a covariate?
+date_covariate <- TRUE
+
+if(date_covariate == FALSE){
+  dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                               colData = pData(set),
                               design = as.formula(paste("~ W_1 + Date + ", contrast)))
+} else{
+  dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
+                              colData = pData(set),
+                              design = as.formula(paste("~ W_1 + ", contrast)))
+}
+
+
 
 # Run DEseq
 dds <- DESeq(dds)
@@ -298,10 +314,10 @@ rlog_dds <- rlog(dds)
 PCA.group <- "Date"
 
 # PCA Plot
-PCA.plot <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 50)
+PCA.plot <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 700)
 
 # Plotly PCA for interactivity
-PCA.plot.data <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 50, returnData = TRUE)
+PCA.plot.data <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 700, returnData = TRUE)
 PCA.plotly <- plot_ly(data = PCA.plot.data, x = ~PC1, y = ~PC2, text = ~name, mode = "markers", color = ~factor(group)) %>%
   layout(title = "PCA Plot",
          xaxis = list(title = "PC1"),
@@ -317,267 +333,9 @@ if(export.PCA == TRUE){
 }
 
 ```
-
-## Run nSolver differential expression analysis 
-
-
-```{r, message=FALSE, warning=FALSE}
-# Set up the DEseq matrix for nsolver
-dds.nsolver <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
-                                      colData = pData(set),
-                                      as.formula(paste("~", contrast)))
-
-pos = raw_reorder[grepl('POS',rownames(raw_reorder)),]
-
-# Housekeeping genes expression
-hk = raw_reorder[grepl('Housekeeping',raw_expression$Class),]
-
-# Set up nSolver
-pos.factors = mean(as.numeric(apply(pos,2,geoMean)))/as.numeric(apply(pos,2,geoMean))
-hk.factors = mean(as.numeric(apply(hk,2,geoMean)))/as.numeric(apply(hk,2,geoMean))
-sizeFactors(dds.nsolver) <- pos.factors * hk.factors
-
-# Run DEseq
-dds.nsolver <- DESeq(dds.nsolver)
-
-# Generate contrasts for each group for nSolver analysis
-contrast_nsolver <- as.data.frame(results(dds.nsolver,contrast = c(contrast,contrast_levels)))
-
-contrast_nsolver_deg_list <- contrast_nsolver[contrast_nsolver$pvalue < 0.05, ]
-
-# Reformat the DEG table to be exported
-nsolver_deg_list_export <- contrast_nsolver_deg_list
-nsolver_deg_list_export$gene <- rownames(nsolver_deg_list_export)
-rownames(nsolver_deg_list_export) <- NULL
-nsolver_deg_list_export <- nsolver_deg_list_export[, c("gene", setdiff(names(nsolver_deg_list_export), "gene"))]
-nsolver_deg_list_export$normalization <- "nCounter"
-
-
-# Overlapping genes between the methods
-
-contrast_nsolver_deg_genes <- rownames(contrast_nsolver_deg_list)
-contrast_ruv_deg_genes <- rownames(contrast_ruv_deg_list)
-shared_gene_list <- intersect(contrast_nsolver_deg_genes, contrast_ruv_deg_genes)
-
-# Create the total DEG list from each norm type for export
-
-combined_DEG_list_export <- rbind(ruv_deg_list_export, nsolver_deg_list_export)
-
-# Write out the DEG list, if desired
-
-# Only significant
-export_sig_DEG_list <- TRUE
-if(export_sig_DEG_list == TRUE){
-  write.csv(combined_DEG_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
-}
-
-# All results
-export_all_DEG_list <- TRUE
-if(export_all_DEG_list == TRUE){
-  write.csv(contrast_ruv, file = paste0("Results/DEG/all_DEG_results_",contrast,".csv"), row.names = TRUE)
-}
-
-```
-
-# Create the plot for comparing RUVseq vs. nSolver p-values
-
-```{r pvalue_ruvseq_v_nsolver, message=FALSE, warning=FALSE}
-
-# Create comparison plots between RUVseq and nSolver analysis
-pval.plot.contrast = data.frame(Method = rep(c('nSolver','RUVSeq'),each = nrow(contrast_ruv)),
-                           P = c(contrast_nsolver$pvalue,contrast_ruv$pvalue))
-
-pval.plot.contrast$Contrast = contrast
-
-pval.plot.contrast$Contrast = as.factor(pval.plot.contrast$Contrast)
-
-pvals = ggplot(data = pval.plot.contrast,
-               aes(x = P,color = Method,
-                   fill = Method)) + geom_histogram(alpha = .2) +
-  facet_wrap(~Contrast) + theme_minimal() +
-  theme(axis.text=element_text(size=12),
-        axis.title=element_text(size=24),
-        plot.title = element_text(size = 30),
-        legend.title=element_text(size=20),
-        legend.text=element_text(size=20),
-        strip.text = element_text(size=24),
-        panel.spacing=unit(1, "lines"),
-        panel.border = element_rect(color = "grey", 
-                                    fill = NA, size = .1),
-        legend.position = 'bottom') +
-  scale_color_manual(values = c("#377EB8","#E41A1C","#4DAF4A")) + 
-  scale_fill_manual(values = c("#377EB8","#E41A1C","#4DAF4A")) +
-  ylab('Count')
-
-print(pvals)
-
-# Export the plot, if desired
-export_pval_plot <- TRUE
-if(export_pval_plot == TRUE){
-  ggsave(paste0("Results/QC/pval_plot_",contrast,".pdf"), plot = pvals)
-}
-
-```
-
-## Set up boxplots for comparing counts
-
-```{r, message=FALSE, warning=FALSE}
-#### IL2
-# Create RUVseq vs. nSolver comparison plot for IL2
-
-# Gather stat sig DEGs from each method
-contrast_ruv_degs = subset(contrast_ruv,pvalue < 0.05)
-contrast_nsolver_degs = subset(contrast_nsolver,pvalue < 0.05)
-nrow(contrast_ruv_degs)
-nrow(contrast_nsolver_degs)
-
-# Overlapping DEGs
-length(intersect(rownames(contrast_ruv_degs),rownames(contrast_nsolver_degs)))
-degs.both = intersect(rownames(contrast_ruv_degs),rownames(contrast_nsolver_degs))
-
-# Label DEGS from each method
-contrast_ruv_degs_unique = rownames(contrast_ruv_degs)[!(rownames(contrast_ruv_degs) %in% degs.both)]
-contrast_nsolver_degs_unique = rownames(contrast_nsolver_degs)[!(row.names(contrast_nsolver_degs) %in% degs.both)]
-
-# Set up matrix for il2 comparison boxplot 
-boxplot.df = data.frame(Method = c(rep('Both',length(degs.both)),
-                                       rep('RUVSeq',length(contrast_ruv_degs_unique)),
-                                       rep('nSolver',length(contrast_nsolver_degs_unique))),
-                            Median = c(rowMedians(as.matrix(log2(raw_reorder[rownames(raw_reorder) %in% degs.both,]+1))),
-                                       rowMedians(as.matrix(log2(raw_reorder[rownames(raw_reorder) %in% contrast_ruv_degs_unique,]+1))),
-                                       rowMedians(as.matrix(log2(raw_reorder[rownames(raw_reorder) %in% contrast_nsolver_degs_unique,]+1)))))
-#boxplot.df$Contrast = 'KS_alone'
-#boxplot.df$Contrast = 'CD4_group'
-boxplot.df$Contrast = contrast
-
-# Run Nanostring normalization 
-colnames(raw_expression)[1:2] = c('Name','Code.Class')
-NanoString.mRNA.norm <- NanoStringNorm(
-  x = raw_expression,
-  anno = NA,
-  CodeCount = 'sum',
-  Background = 'none',
-  SampleContent = 'housekeeping.sum',
-  round.values = FALSE,
-  take.log = TRUE,
-  return.matrix.of.endogenous.probes = TRUE
-)
-
-boxplot.df$Contrast = as.factor(boxplot.df$Contrast)
-
-```
-
-## Create the boxplot for count comparison
-
-```{r compare_counts_boxplot, message=FALSE, warning=FALSE}
-
-# Create boxplot
-boxplot = ggplot(data = boxplot.df,
-                 aes(x = Method,
-                     y = Median)) + geom_boxplot() + 
-  geom_jitter(shape=16, position=position_jitter(0.2)) +
-  theme_minimal() +
-  theme(axis.text=element_text(size=12),
-        axis.title=element_text(size=24),
-        plot.title = element_text(size = 30),
-        legend.title=element_text(size=20),
-        legend.text=element_text(size=20),
-        strip.text = element_text(size=24),
-        panel.spacing=unit(1, "lines"),
-        panel.border = element_rect(color = "grey", 
-                                    fill = NA, size = .1),
-        legend.position = 'bottom') + ylab('Median raw log-counts') + facet_wrap(~Contrast)
-
-print(boxplot)
-
-# Export the plot, if desired
-export_boxplot_plot <- TRUE
-if(export_boxplot_plot == TRUE){
-  ggsave(paste0("Results/QC/boxplot_plot_",contrast,".pdf"), plot = boxplot)
-}
-
-```
-
-# Set up the plot to compare log fold change
-
-```{r, message=FALSE, warning=FALSE}
-
-# Set up dot plot
-
-# Gather genes for each method and overlapping genes
-#res_il2.plot = subset(res_il2,rownames(res_il2) %in% c(il2.both,rownames(il2.nsolver),
-#                                                       rownames(il2.ruv)))
-
-contrast.plot = subset(contrast_ruv,rownames(contrast_ruv) %in% c(degs.both,rownames(contrast_nsolver_degs),
-                                                       rownames(contrast_ruv_degs)))
-
-contrast.nsolver.plot = subset(contrast_nsolver,
-                              rownames(contrast_ruv) %in% 
-                                c(degs.both,rownames(contrast_nsolver_degs),rownames(contrast_ruv_degs)))
-
-# Matrix of fold change per method
-contrast.plot.tot = data.frame(Gene = rownames(contrast.plot),
-                              nSolverFC = contrast.nsolver.plot$log2FoldChange,
-                              nSolverSE = contrast.nsolver.plot$lfcSE,
-                              RUVFC = contrast.plot$log2FoldChange,
-                              RUVSE = contrast.plot$lfcSE)
-
-# Label fold change matrix
-contrast.plot.tot$Method = ifelse(contrast.plot.tot$Gene %in% degs.both,'Both',
-                                 ifelse(contrast.plot.tot$Gene %in% rownames(contrast_nsolver_degs),
-                                        'nSolver only','RUVSeq only'))
-#contrast.plot.tot$Contrast = 'ks_alone'
-#contrast.plot.tot$Contrast = 'CD4_group'
-contrast.plot.tot$Contrast = contrast
-
-
-# Create the comparison dot plot data
-contrast.plot.tot$Contrast = as.factor(contrast.plot.tot$Contrast)
-contrast.plot.tot$Method = factor(contrast.plot.tot$Method,
-                             levels = c('Both','nSolver only','RUVSeq only'))
-contrast.plot.tot = contrast.plot.tot[order(contrast.plot.tot$Method,decreasing = T),]
-
-```
-
-## Create the plot for comparing fold change between analysis methods
-
-```{r fold_change_comparison_plot, message=FALSE, warning=FALSE}
-fc.plot = ggplot(data = contrast.plot.tot,
-                 aes(x = RUVFC, y = nSolverFC, color = Method, text = Gene)) + geom_point(aes(size = RUVSE), alpha = 0.5) +
-  scale_color_manual(values = c("#4DAF4A","#377EB8","#E41A1C")) + 
-  geom_hline(yintercept = 0,linetype = 2) +
-  geom_vline(xintercept = 0,linetype = 2) +  theme_minimal() +
-  theme(axis.text=element_text(size=12),
-        axis.title=element_text(size=10),
-        plot.title = element_text(size = 10),
-        legend.title=element_text(size=10),
-        legend.text=element_text(size=10),
-        strip.text = element_text(size=10),
-        panel.spacing=unit(1, "lines"),
-        panel.border = element_rect(color = "grey", 
-                                    fill = NA, size = .1),
-        legend.position = 'bottom') + facet_wrap(~Contrast) +
-  xlab('Log-fold change (RUVSeq)') + ylab('Log-fold change (nSolver)') +
-  labs(size = 'SE (RUVSeq)') + geom_abline(slope = 1,intercept = 0,linetype = 2, color='grey') +
-  guides(colour = guide_legend(override.aes = list(size=4)))
-
-#print(fc.plot)
-
-fc.plotly <- ggplotly(fc.plot, tooltip = "text")
-
-# Print the plot
-print(fc.plotly)
-
-# Export the plot, if desired
-export_fc_plot <- TRUE
-if(export_fc_plot == TRUE){
-  ggsave(paste0("Results/QC/foldchange_plot_",contrast,".pdf"), plot = fc.plot)
-}
-
-```
 # Get the read count information for CXCL8
 
-``` {r}
+```{r}
 
 normalized_CXCL8 <- set@assayData$counts[rownames(set@assayData$counts) == "CXCL8", ]
 
@@ -609,6 +367,200 @@ export_CXCL8_summary <- TRUE
 if(export_CXCL8_summary == TRUE){
   write.csv(CXCL8_df, file = "Results/CXCL8_summary.csv", row.names = FALSE)
 }
+
+
+```
+
+# Heatmap of Variable Genes
+
+```{r}
+
+# Prepare the normalized counts
+log.norm.counts <- log2(counts(dds, normalized = TRUE) + 1)
+
+# Prepare the annotation columns
+anno.columns <- c("KS_alone", "CD4_group")
+annotation_df <- as.data.frame(annotation_df)
+
+# Ensure the row names are the sample names
+rownames(annotation_df) <- annotation_df$SampleID
+heatmap.annotation <- annotation_df[ ,anno.columns]
+
+# Order the annotation
+heatmap.annotation <- heatmap.annotation %>% 
+  arrange(CD4_group) %>% arrange(KS_alone)
+
+# Define the colors for the annotations
+anno.colors = list(
+  KS_alone = c(Y = "seagreen", N = "red4"), 
+  CD4_group = c(High = "purple", Low = "coral")
+  )
+
+# Determine the most variable genes using the coefficient of variation
+.calcCv <- function(x) {
+  sd(x) / mean(x)
+}
+cv.vector <- apply(log.norm.counts, 1, .calcCv)
+
+# Identify the NEG and POS probes
+NEG.indices <- grep("NEG_", names(cv.vector))
+POS.indices <- grep("POS_", names(cv.vector))
+control.indices <- c(NEG.indices, POS.indices)
+
+# Print the names of the control probes to be removed
+control.probes <- names(cv.vector)[control.indices]
+print(control.probes)
+
+# Remove the control probes
+cv.vector <- cv.vector[-control.indices]
+
+# Sort the genes based on variability
+cv.vector <- sort(cv.vector, decreasing = TRUE)
+
+# Top variable genes
+ngenes <- 50
+goi <- names(cv.vector)[1:ngenes]
+
+# Reorder the data columns to they match the annotation row order
+row.order <- rownames(heatmap.annotation)
+log.norm.counts <- log.norm.counts[, row.order]
+
+
+# Top 50 genes
+heatmap.top50 <- pheatmap(log.norm.counts[goi, ], 
+         main = "Top 50 Variable Genes", 
+         show_rownames = TRUE, 
+         scale = "row", 
+         show_colnames = TRUE,
+         border_color = NA, 
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE, 
+         clustering_method = "average", 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         color = colorRampPalette(c("blue", "white", "red"))(120), 
+         annotation_row = NA, 
+         annotation_col = heatmap.annotation, 
+         annotation_colors = anno.colors
+         )
+
+export.top50 <- FALSE
+if(export.top50 == TRUE){
+  
+  ggsave("Results/heatmap_top50.png",
+         plot = heatmap.top50, 
+         width = 10, 
+         height = 10, 
+         units = "in")
+  
+}
+
+# Create a heatmap with all genes
+heatmap.all <- pheatmap(log.norm.counts, 
+         main = "All Genes", 
+         show_rownames = FALSE, 
+         scale = "row", 
+         show_colnames = TRUE,
+         border_color = NA, 
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE, 
+         clustering_method = "average", 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         color = colorRampPalette(c("blue", "white", "red"))(120), 
+         annotation_row = NA, 
+         annotation_col = heatmap.annotation, 
+         annotation_colors = anno.colors
+         )
+
+export.heatmap.all <- FALSE
+if(export.heatmap.all == TRUE){
+  
+  ggsave("Results/heatmap_all.png",
+         plot = heatmap.all, 
+         width = 10, 
+         height = 10, 
+         units = "in")
+  
+}
+
+
+# Create a heatmap for the DEGs from the DEG contrast
+
+# Get a list of the DEGS
+contrast_deg_list <- rownames(contrast_ruv[contrast_ruv$padj < 0.10, ])
+
+# Remove the positive and negative probes
+# Identify the NEG and POS probes
+NEG.indices <- grep("NEG_", contrast_deg_list)
+POS.indices <- grep("POS_", contrast_deg_list)
+control.indices <- c(NEG.indices, POS.indices)
+
+# Remove the control probes
+if(length(control.indices) > 0){
+  goi <- contrast_deg_list[-control.indices]
+} else{
+  goi <- contrast_deg_list
+}
+
+
+# Gather the annotation for the contrast
+anno.columns <- c(contrast)
+annotation_df <- as.data.frame(annotation_df)
+
+# Ensure the row names are the sample names
+rownames(annotation_df) <- annotation_df$SampleID
+heatmap.annotation <- annotation_df[ ,anno.columns, drop = FALSE]
+
+# Order the annotation
+heatmap.annotation <- heatmap.annotation %>% arrange(.data[[contrast]])
+
+# Reorder the data columns to they match the annotation row order
+row.order <- rownames(heatmap.annotation)
+log.norm.counts <- log.norm.counts[, row.order]
+
+# Define the annotation colors for the contrast
+anno.colors1 = list(
+  KS_alone = c(Y = "seagreen", N = "red4")
+  )
+
+anno.colors2 = list(
+  CD4_group = c(High = "purple", Low = "coral")
+  )
+
+heatmap.contrast <- pheatmap(log.norm.counts[goi, ], 
+         main = paste0("DEGs for ", contrast), 
+         show_rownames = TRUE, 
+         scale = "row", 
+         show_colnames = TRUE,
+         border_color = NA, 
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE, 
+         clustering_method = "average", 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         color = colorRampPalette(c("blue", "white", "red"))(120), 
+         annotation_row = NA, 
+         annotation_col = heatmap.annotation, 
+         annotation_colors = anno.colors2
+         )
+
+
+export.heatmap.contrast <- TRUE
+if(export.heatmap.contrast == TRUE){
+  
+  ggsave(paste0("Results/heatmap_", contrast, ".png"),
+         plot = heatmap.contrast, 
+         width = 10, 
+         height = 10, 
+         units = "in")
+  
+}
+
+print(heatmap.top50)
+print(heatmap.all)
+print(heatmap.contrast)
+
 
 
 ```

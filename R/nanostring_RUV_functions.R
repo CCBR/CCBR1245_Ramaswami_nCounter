@@ -90,6 +90,25 @@ limitOfDetectionQC <- function(rcc,numSD = 0){
   
 }
 
+limitOfDetectionScore <- function(rcc,numSD = 0){
+  
+  #### INPUT: rcc - input from rcc
+  ####         numSD - number of standard deviations to calibrate the LOD
+  #### OUTPUT: the score for limit of detection
+  
+  counts = rcc$Code_Summary
+  
+  # Gather the counts gfor positive and neagtive probes
+  posE = as.numeric(counts$Count[counts$Name == 'POS_E'])
+  negControls = as.numeric(counts$Count[grepl('NEG',counts$Name)])
+  
+  # Calculate the negative background
+  neg_background <- mean(negControls) + numSD*sd(negControls)
+  
+  # Return the limit of detection comparison
+  return(paste0(posE, "/", neg_background))
+}
+
 positiveLinQC <- function(rcc){
   
   #### INPUT: rcc - input from rcc
@@ -102,6 +121,20 @@ positiveLinQC <- function(rcc){
   r2 = summary(lm(sort(posControls)~sort(known)))$r.squared
   if(!(r2 > .95) | is.na(r2)) {return('Flag')}
   if(r2 > .95) {return('No flag')}
+  
+}
+
+positiveLinScore <- function(rcc){
+  
+  #### INPUT: rcc - input from rcc
+  #### OUTPUT: score for linearity for positive controls
+  
+  
+  counts = rcc$Code_Summary
+  posControls = as.numeric(counts$Count[grepl('POS_',counts$Name)])
+  known = c(128,128/4,128/16,128/64,128/256,128/(256*4))
+  r2 = summary(lm(sort(posControls)~sort(known)))$r.squared
+  return(r2)
   
 }
 
