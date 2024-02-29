@@ -47,14 +47,14 @@ annotation_df <- read_excel(annotation_file_path)
 ```{r Define the contrast for the DEG analysis, message=FALSE, warning=FALSE}
 
 # Define the contrast and levels from the annotation columns for QC and DEG analysis
-contrast <- "CD4_group"
-#contrast <- "KS_alone"
+#contrast <- "CD4_group"
+contrast <- "KS_alone"
 #contrast <- "KSHV_VL_Bin"
 
 # Levels are: Reference, Effect. 
 # This means a positive log2foldchnage = lower reference, higher effect
-contrast_levels <- c("High", "Low")
-#contrast_levels <- c("Y", "N")
+#contrast_levels <- c("High", "Low")
+contrast_levels <- c("Y", "N")
 #contrast_levels <- c("0", "1")
 
 ```
@@ -259,9 +259,9 @@ load(paste0("cauley_ruv_set_k_",i,".rda"))
 # DEseq Dataset
 
 # Should date of the experiment be used as a covariate?
-date_covariate <- TRUE
+date_covariate <- FALSE
 
-if(date_covariate == FALSE){
+if(date_covariate == TRUE){
   dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
                               colData = pData(set),
                               design = as.formula(paste("~ W_1 + Date + ", contrast)))
@@ -305,6 +305,12 @@ if(export_norm_counts == TRUE){
   
 }
 
+# Export the DEG list
+export_sig_DEG_list <- TRUE
+if(export_sig_DEG_list == TRUE){
+  write.csv(ruv_deg_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
+}
+
 # Plot PCA to check for batch effects
 
 # Prepare the counts
@@ -327,7 +333,7 @@ print(PCA.plotly)
 
 # Export the PCA plot
 
-export.PCA <- TRUE
+export.PCA <- FALSE
 if(export.PCA == TRUE){
   ggsave(paste0("Results/QC/PCA.pdf"), plot = PCA.plot)
 }

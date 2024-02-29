@@ -36,7 +36,7 @@ RUV_total <- function(raw,pData,fData,k,hkgenes = NULL,exclude = NULL){
   dds <- estimateSizeFactors(dds)
   dds <- estimateDispersionsGeneEst(dds)
   cts <- counts(dds, normalized=TRUE)
-  disp <- pmax((rowVars(cts) - rowMeans(cts)),0)/rowMeans(cts)^2
+  disp <- pmax((rowVars(cts, useNames = TRUE) - rowMeans(cts)),0)/rowMeans(cts)^2
   mcols(dds)$dispGeneEst <- disp
   dds <- estimateDispersionsFit(dds, fitType="mean")
   vsd <- varianceStabilizingTransformation(dds, blind=FALSE)
