@@ -28,6 +28,7 @@ library(NanoStringNorm)
 library(readxl)
 library(plotly)
 library(pheatmap)
+library(ggrepel)
 
 # The library in RSW to use is located at
 # /home/cauleyes/ccbr-data/renv_cache/ncounter_rna/Snapshot-environment_method/renv/library/R-4.1/x86_64-pc-linux-gnu
@@ -39,7 +40,8 @@ setwd("/home/cauleyes/ccbr-data/users/Ned/nCounter_rna/CCBR1245_Ramaswami_nCount
 source("R/nanostring_RUV_functions.R")
 
 # Load the annotation file
-annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
+#annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
+annotation_file_path <- "ncounter_rna_annotation_edit_RR_March2024.xlsx"
 annotation_df <- read_excel(annotation_file_path)
 
 ```
@@ -290,7 +292,7 @@ ruv_deg_list_export$normalization <- "RUVseq"
 
 
 # Export Normalized read counts
-export_norm_counts <- TRUE
+export_norm_counts <- FALSE
 if(export_norm_counts == TRUE){
   # Grab the normalized_counts
   normalized_counts <- as.data.frame(counts(dds, normalized = TRUE))
@@ -306,10 +308,16 @@ if(export_norm_counts == TRUE){
 }
 
 # Export the DEG list
-export_sig_DEG_list <- TRUE
+export_sig_DEG_list <- FALSE
 if(export_sig_DEG_list == TRUE){
   write.csv(ruv_deg_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
 }
+
+```
+
+# Unsupervised analysis
+
+```{r}
 
 # Plot PCA to check for batch effects
 
@@ -369,7 +377,7 @@ CXCL8_df$CD4_group_mean <- ifelse(CXCL8_df$CD4_group == "High", CXCL8_mean_CD4_H
 
 CXCL8_deg <- ruv_deg_list_export[ruv_deg_list_export$gene == "CXCL8", ]
 
-export_CXCL8_summary <- TRUE
+export_CXCL8_summary <- FALSE
 if(export_CXCL8_summary == TRUE){
   write.csv(CXCL8_df, file = "Results/CXCL8_summary.csv", row.names = FALSE)
 }
@@ -552,7 +560,7 @@ heatmap.contrast <- pheatmap(log.norm.counts[goi, ],
          )
 
 
-export.heatmap.contrast <- TRUE
+export.heatmap.contrast <- FALSE
 if(export.heatmap.contrast == TRUE){
   
   ggsave(paste0("Results/heatmap_", contrast, ".png"),
@@ -568,5 +576,125 @@ print(heatmap.all)
 print(heatmap.contrast)
 
 
+
+```
+
+# Volcano Plots
+
+```{r}
+
+# Load the DE results
+contrast_ruv$gene <- rownames(contrast_ruv)
+deg.results.df <- contrast_ruv
+
+# Remove the control probes
+deg.results.df <- deg.results.df[!grepl("^POS_|^NEG_", deg.results.df$gene), ]
+
+
+# Create a column for direction of DEGs
+deg.results.df$de_direction <- "NONE"
+deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
+                             deg.results.df$log2FoldChange > 1] <- "UP"
+deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
+                             deg.results.df$log2FoldChange < -1] <- "DOWN"
+
+deg.results.df$deglabel <- ifelse(deg.results.df$de_direction == "NONE", NA, deg.results.df$gene)
+
+# Compute the scale for the volcano x-axis
+log2.scale <- max(abs(deg.results.df$log2FoldChange))
+
+# Make the volcano plot
+
+volcano.plot <- ggplot(data = deg.results.df, aes(x = log2FoldChange, 
+                                                  y = -log10(padj), 
+                                                  col = de_direction, 
+                                                  label = deglabel)) +
+  geom_vline(xintercept = c(-1, 1), col = "gray", linetype = 'dashed') +
+  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+  xlim(-7.5, 7.5) + 
+  labs(x = "CD4 Group High versus Low", 
+       y = "-log10 adjusted p-value", 
+       title = paste0(contrast, " DE Analysis")) + 
+  geom_point(size = 2) +
+  scale_color_manual(values = c("steelblue4", "grey", "violetred4"), 
+                     labels = c("Downregulated in High", "Not significant", "Upregulated in High")) + 
+  geom_text_repel(max.overlaps = Inf) + 
+  xlim(-log2.scale-1, log2.scale+1) + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+export.volcano <- FALSE
+if(export.volcano == TRUE){
+    ggsave(paste0("Results/volcano_", contrast, "_adjpval.png"),
+         plot = volcano.plot, 
+         width = 8, 
+         height = 8, 
+         units = "in")
+}
+
+
+```
+
+
+# Clustering of Viral Gene Probes
+
+```{r}
+
+# See reference vignette: https://bioconductor.org/packages/release/bioc/vignettes/PCAtools/inst/doc/PCAtools.html#introduction
+
+library(stringr)
+library(dplyr)
+library(ggfortify)
+library(PCAtools)
+
+# Transform DESEQ normalized counts to variance stabilized
+vst.dds <- varianceStabilizingTransformation(dds)
+
+# Gather normalized counts for KSHV probes
+normalized.counts <- as.data.frame(assay(vst.dds))
+
+# Subset for KSHV genes
+normalized.counts.kshv <- normalized.counts %>% filter(str_detect(gene, "^KSHV")) 
+
+# Run PCA
+kshv.pca <- pca(normalized.counts.kshv, 
+                metadata = merged_pData, 
+                removeVar = 0.1)
+
+# Plot PCA
+
+biplot(kshv.pca, 
+       colby = "KSHV_VL_Bin", 
+       legendPosition = 'top', 
+       legendLabSize = 16, 
+       legendIconSize = 8.0)
+
+screeplot <- screeplot(kshv.pca)
+
+# Visualize clustering of genes
+
+kshv_annotation <- as.data.frame(read_excel("kshv_genes_annotation.xlsx"))
+
+rownames(kshv_annotation) <- kshv_annotation$gene
+
+# Transpose gene counts
+normalized.counts.kshv.transpose <- as.data.frame(t(normalized.counts.kshv))
+
+# Ensure the rows and columns of the metadata and counts are aligned
+kshv_annotation <- kshv_annotation[order(rownames(kshv_annotation)), ]
+normalized.counts.kshv.transpose <- normalized.counts.kshv.transpose[ order(colnames(normalized.counts.kshv.transpose))]
+
+# Create PCA for genes 
+
+kshv.pca.by.gene <- pca(normalized.counts.kshv.transpose, 
+                        metadata = kshv_annotation, 
+                        removeVar = 0.1)
+
+
+pca.kshv.gene <- biplot(kshv.pca.by.gene, 
+       colby = "type", 
+       legendPosition = 'top', 
+       legendLabSize = 16, 
+       legendIconSize = 8.0)
 
 ```
