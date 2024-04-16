@@ -1,7 +1,7 @@
 ---
 title: "nCounter_RNA_Analysis"
 author: "Ned Cauley"
-date: "12/13/23"
+date: "4/16/24"
 output: html_document
 ---
 
@@ -30,6 +30,7 @@ library(plotly)
 library(pheatmap)
 library(ggrepel)
 
+
 # The library in RSW to use is located at
 # /home/cauleyes/ccbr-data/renv_cache/ncounter_rna/Snapshot-environment_method/renv/library/R-4.1/x86_64-pc-linux-gnu
 
@@ -37,11 +38,12 @@ library(ggrepel)
 setwd("/home/cauleyes/ccbr-data/users/Ned/nCounter_rna/CCBR1245_Ramaswami_nCounter")
 
 # Functions for RUVseq analysis
-source("R/nanostring_RUV_functions.R")
+#source("R/nanostring_RUV_functions.R")
+source("R/ncounter_analysis_functions.R")
 
 # Load the annotation file
 #annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
-annotation_file_path <- "ncounter_rna_annotation_edit_RR_March2024.xlsx"
+annotation_file_path <- "4_15_24_ncounter_rna_annotation_edit_NC.xlsx"
 annotation_df <- read_excel(annotation_file_path)
 
 ```
@@ -49,15 +51,28 @@ annotation_df <- read_excel(annotation_file_path)
 ```{r Define the contrast for the DEG analysis, message=FALSE, warning=FALSE}
 
 # Define the contrast and levels from the annotation columns for QC and DEG analysis
+contrasts.list <- list(
+  "CD4_count" = c("High", "Low"), 
+  "KS_alone" = c("Y", "N"), 
+  "KSHV_VL" = c("1", "0"), 
+  "HIV_VL" = c("Y", "N"), 
+  "response" = c("Y", "N")
+)
+
 #contrast <- "CD4_group"
-contrast <- "KS_alone"
+#contrast <- "KS_alone"
 #contrast <- "KSHV_VL_Bin"
+
 
 # Levels are: Reference, Effect. 
 # This means a positive log2foldchnage = lower reference, higher effect
 #contrast_levels <- c("High", "Low")
-contrast_levels <- c("Y", "N")
+#contrast_levels <- c("Y", "N")
 #contrast_levels <- c("0", "1")
+
+
+
+
 
 ```
 
@@ -65,126 +80,20 @@ contrast_levels <- c("Y", "N")
 ## Setup the initial dataframes with read counts and metadata/QC
 
 ```{r Initial Dataframes and QC,  message=FALSE, warning=FALSE}
+
+rcc.files.path <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc"
+
 # Gather the names of the RCC files
-files.RCC = list.files("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc")
-files.RCC = files.RCC[grepl('RCC',files.RCC)]
-# Add name of sub folder containing RCC files
-rcc_folder <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc"
-#files.RCC <- file.path(rcc_folder, files.RCC)
+#files.RCC = list.files("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc")
 
-# Gather number of genes and samples
-rcc.example.file <- file.path(rcc_folder, files.RCC[1])
-#genes.count = nrow(readRcc(file.path(rcc_folder, files.RCC[1])$Code_Summary))
-genes.count = nrow(readRcc(rcc.example.file)$Code_Summary)
-ncol = length(files.RCC)
+# Process the RCC files as count, metadata, and feature data DFs
+rcc.dfs <- process_RCC_files(rcc.files.path = rcc.files.path, 
+                  annotation.df = annotation_df)
 
-# Set up the dataframe to hold all sample and gene data
-raw_expression = as.data.frame(matrix(nrow = genes.count,ncol = length(files.RCC)+2))
-colnames(raw_expression)[1:2] = c('Gene','Class')
-
-# Set up a dataframe to hold metadata and QC
-pData = as.data.frame(matrix(nrow = length(files.RCC),ncol = 11))
-colnames(pData) = c('BCAC_ID','SampleID','Owner','Comments','Date','GeneRLF','SystemAPF','imagingQC',
-                    'bindingDensityQC','limitOfDetectionQC','positiveLinearityQC')
-
-# Populate gene and class columns of expression df
-raw_expression[,1:2] = readRcc(rcc.example.file)$Code_Summary[,c(2,1)]
-
-print("RCC files to be processed:")
-# Populate expression df, run QC, and record flags for each sample
-for (i in 1:length(files.RCC)){
-  
-  print(files.RCC[i])
-  rcc.path <- file.path(rcc_folder, files.RCC[i])
-  rcc = readRcc(rcc.path)
-  raw = rcc$Code_Summary
-  
-  raw_expression[,i+2] = as.numeric(raw$Count)
-  colnames(raw_expression)[i+2] = strsplit(files.RCC[i],'_')[[1]][3]
-  pData[i,2:7] = as.vector(rcc$Sample_Attributes)
-  pData$imagingQC[i] = imagingQC(rcc)
-  pData$imaging[i] <-  as.numeric(rcc$Lane_Attributes[3])
-  pData$bindingDensityQC[i] = bindingDensityQC(rcc,.05,2.25)
-  pData$bindingDensity[i] <- as.numeric(rcc$Lane_Attributes[6])
-  pData$limitOfDetectionQC[i] = limitOfDetectionQC(rcc)
-  pData$limitOfDetection[i] <- limitOfDetectionScore(rcc)
-  pData$positiveLinearityQC[i] = positiveLinQC(rcc)
-  pData$positiveLinearityQC[i] <- positiveLinScore(rcc)
-}
-
-# Correct the sample ID column name and sample name IDs
-# Correct for annotation
-colnames(annotation_df)[4] <- "SampleID"
-annotation_df$"SampleID" <- gsub("-", " ", annotation_df$"SampleID")
-annotation_df$"SampleID" <- gsub("\\sSB", "SB", annotation_df$"SampleID")
-
-# Correct for pdata
-pData$"SampleID" <- gsub("-", " ", pData$"SampleID")
-pData$"SampleID" <- gsub("\\sSB", "SB", pData$"SampleID")
-
-# Rename and factor the KS alone field and sort by Yes or No
-colnames(annotation_df)[colnames(annotation_df) == "KS alone"] <- "KS_alone"
-colnames(annotation_df)[colnames(annotation_df) == "CD4 count...11"] <- "CD4_group"
-colnames(annotation_df)[colnames(annotation_df) == "KSHV VL Bin"] <- "KSHV_VL_Bin"
-
-# Combine all metadata into a single dataframe
-merged_pData <- merge(pData, annotation_df, by = "SampleID")
-
-merged_pData[[contrast]] <- factor(merged_pData[[contrast]], levels = contrast_levels)
-
-# Create a feature df
-raw = raw_expression[,-c(1:2)]
-fData = raw_expression[,c(1:2)]
-rownames(raw) = fData$Gene
-
-# Correct the Sample ID column names for preceding spaces and hyphens
-colnames(raw) <- gsub("^\\s+", "", colnames(raw))
-colnames(raw) <- gsub("-", " ", colnames(raw))
-
-
-# List the information for the feature data frame
-str(fData)
-count_endog <- sum(fData$Class == "Endogenous")
-count_neg <- sum(fData$Class == "Negative")
-count_pos <- sum(fData$Class == "Positive")
-count_hk <- sum(fData$Class == "Housekeeping")
-
-print(paste0("Endogenous genes: ",count_endog))
-print(paste0("Negative genes: ",count_neg))
-print(paste0("Positive genes: ",count_pos))
-print(paste0("Housekeeping geness: ",count_hk))
-
-# List the housekeeping genes and label in the fData df
-cIdx <- fData$Gene[fData$Class == "Housekeeping"]
-
-# Identify missing housekeeping genes in any samples
-merged_pData$HK_Gene_Miss = colSums(raw[cIdx,] == 0)
-
-# Estbalish all of the rownames of the three dfs
-rownames(fData) = fData$Gene
-rownames(raw) = fData$Gene
-rownames(merged_pData) <- merged_pData$SampleID
-
-# Ensure the order of the SampleID columns in the expression data frame match the order of the rows in the metadata
-raw_reorder <- raw[, rownames(merged_pData)]
-
-# Remove outlier sample
-remove_outlier <- FALSE
-if(remove_outlier == TRUE){
-  
-  outlier <- "SB 19 5920"
-  
-  # Remove from annotation
-  merged_pData <- merged_pData[merged_pData$SampleID != outlier, ]
-  
-  # Remove from counts
-  raw_reorder <- raw_reorder[, !names(raw_reorder) %in% outlier]
-}
-
-print("Initial data frames")
-head(raw_reorder)
-head(merged_pData)
-head(fData)
+# Print a sumnmary of the DFs
+head(rcc.dfs$raw.counts)
+head(rcc.dfs$pData)
+head(rcc.dfs$fData)
 
 ```
 
@@ -196,13 +105,13 @@ head(fData)
 ###
 
 # Gather the read counts for housekeeping genes
-hk_raw = raw_reorder[cIdx,]
+hk_raw = rcc.dfs$raw.counts[rcc.dfs$hk.gene.list,]
 pval = vector(length = nrow(hk_raw))
 
 # Run general linear model to get pvalue for housekeeping
 for (i in 1:nrow(hk_raw)){
   
-  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(merged_pData[[contrast]]))
+  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(rcc.dfs$pData[[contrast]]))
   pval[i] = coef(summary(reg))[2,4]
   
 }
@@ -220,98 +129,103 @@ sum(pval <= .05)
 
 ```{r, message=FALSE, warning=FALSE}
 
+# Create a new folder for the run date
+run.folder <- "4_16_2024/"
 
-# Number of sources of variance to identify with RUVseq
-k = 1
-
-# Remove samples with NA from the read counts dataframe
-NA_rows <- which(!complete.cases(merged_pData[[contrast]]))
-NA_samples <- rownames(merged_pData[NA_rows, ])
-
-if(length(NA_rows) > 0){
-  raw_reorder <- raw_reorder[, -which(names(raw_reorder) %in% NA_samples)]
-}
-
-
-
-# Remove sample with NA from the annotation
-if(length(NA_rows) > 0){
-  merged_pData <- merged_pData[complete.cases(merged_pData[[contrast]]), ]
-}
-
-
-
-# DEseq transform for RUVseq
-vsd = RUV_total(raw_reorder,merged_pData,fData,k = k)$vsd
-# Set Expression Set
-set = RUV_total(raw_reorder,merged_pData,fData,k = k)$set
-
-# Remove row of the contrast that contain NA values
-set <- set[complete.cases(pData(set)$KSHV_VL_Bin), ]
-
-# Save the results
-save(vsd,file = paste0("cauley_ruv_vsd_k_",k,".rda"))
-save(set,file = paste0("cauley_ruv_set_k_",k,".rda"))
-
-
-i = 1
-
-results = paste0("cauley_deg_k",i,".csv")
-load(paste0("cauley_ruv_set_k_",i,".rda"))
-# DEseq Dataset
-
-# Should date of the experiment be used as a covariate?
-date_covariate <- FALSE
-
-if(date_covariate == TRUE){
-  dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
-                              colData = pData(set),
-                              design = as.formula(paste("~ W_1 + Date + ", contrast)))
-} else{
-  dds <- DESeqDataSetFromMatrix(countData = counts(set)[1:nrow(set),],
-                              colData = pData(set),
-                              design = as.formula(paste("~ W_1 + ", contrast)))
-}
-
-
-
-# Run DEseq
-dds <- DESeq(dds)
-
-# Generate contrasts per group
-contrast_ruv <- as.data.frame(results(dds,contrast = c(contrast, contrast_levels)))
-
-contrast_ruv_deg_list <- contrast_ruv[contrast_ruv$pvalue < 0.05, ]
-
-# Reformat the DEG table to be exported
-ruv_deg_list_export <- contrast_ruv_deg_list
-ruv_deg_list_export$gene <- rownames(ruv_deg_list_export)
-rownames(ruv_deg_list_export) <- NULL
-ruv_deg_list_export <- ruv_deg_list_export[, c("gene", setdiff(names(ruv_deg_list_export), "gene"))]
-ruv_deg_list_export$normalization <- "RUVseq"
-
-
-# Export Normalized read counts
-export_norm_counts <- TRUE
-if(export_norm_counts == TRUE){
-  # Grab the normalized_counts
-  normalized_counts <- as.data.frame(counts(dds, normalized = TRUE))
+for(contrast in names(contrasts.list)){
   
-  # Add a gene column
-  gene <- rownames(normalized_counts)
-  normalized_counts <- cbind(gene, normalized_counts) 
+  contrast.levels <- contrasts.list[[contrast]]
   
-  # Export
-  write.csv(normalized_counts, file = paste0("Results/RUV_normalized_counts.csv"), row.names = FALSE)
+  # Run DESEQ with RUVseq normalization for k sources of variability
+  deseq.output <- run_RUV_DESEQ2(contrast = contrast, 
+                 contrast.levels = contrast.levels, 
+                 annotation.data = rcc.dfs$pData, 
+                 raw.counts = rcc.dfs$raw.counts, 
+                 feature.data = rcc.dfs$fData, 
+                 k = 1, 
+                 additional.covar = NULL, 
+                 hk.genes = rcc.dfs$hk.gene.list, 
+                 exclude.hk.genes = NULL)
   
   
+  ## Make a volcano plot for the DEGs
+  
+  # Remove the control probes
+  deg.results.df <- deseq.output$all.de.results[!grepl("^POS_|^NEG_", 
+                                                       deseq.output$all.de.results), ]
+  
+  
+  # Create a column for direction of DEGs
+  deg.results.df$de_direction <- "NONE"
+  deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
+                               deg.results.df$log2FoldChange > 1] <- "UP"
+  deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
+                               deg.results.df$log2FoldChange < -1] <- "DOWN"
+  
+  deg.results.df$deglabel <- ifelse(deg.results.df$de_direction == "NONE", NA, deg.results.df$gene)
+  
+  # Compute the scale for the volcano x-axis
+  log2.scale <- max(abs(deg.results.df$log2FoldChange))
+  
+  # Make the volcano plot
+  
+  volcano.plot <- ggplot(data = deg.results.df, aes(x = log2FoldChange, 
+                                                    y = -log10(padj), 
+                                                    col = de_direction, 
+                                                    label = deglabel)) +
+    geom_vline(xintercept = c(-1, 1), col = "gray", linetype = 'dashed') +
+    geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+    xlim(-7.5, 7.5) + 
+    labs(x = paste(contrast, contrast.levels[[1]], "versus", contrast.levels[[2]]),
+         y = "-log10 adjusted p-value", 
+         title = paste0(contrast, " DE Analysis")) + 
+    geom_point(size = 2) +
+    scale_color_manual(values = c("steelblue4", "grey", "violetred4"), 
+                       labels = c(paste("Downregulated in", contrast_levels[[1]]), "Not significant",   paste("Upregulated in", contrast_levels[[1]]))) + 
+    geom_text_repel(max.overlaps = Inf) + 
+    xlim(-log2.scale-1, log2.scale+1) + 
+    theme(plot.title = element_text(hjust = 0.5))
+  
+  
+  export.volcano <- TRUE
+  if(export.volcano == TRUE){
+      ggsave(paste0("Results/", run.folder, "volcano_", contrast, "_adjpval.png"),
+           plot = volcano.plot, 
+           width = 8, 
+           height = 8, 
+           units = "in")
+  }
+  
+  # Export Normalized read counts
+  export_norm_counts <- TRUE
+  if(export_norm_counts == TRUE){
+    # Grab the normalized_counts
+    normalized_counts <- as.data.frame(counts(deseq.output$dds, normalized = TRUE))
+    
+    # Add a gene column
+    gene <- rownames(normalized_counts)
+    normalized_counts <- cbind(gene, normalized_counts) 
+    
+    # Export
+    write.csv(normalized_counts, file = paste0("Results/", run.folder, "RUV_normalized_counts.csv"), row.names = FALSE)
+    
+    
+  }
+  
+  # Export the DE results
+  export_sig_DEG_list <- TRUE
+  if(export_sig_DEG_list == TRUE){
+    write.csv(deseq.output$deg.list, file = paste0("Results/", run.folder, "DEG_list_",contrast,".csv"), row.names =   FALSE)
+  }
+ 
+  
+  
+  
+  
+   
 }
 
-# Export the DEG list
-export_sig_DEG_list <- TRUE
-if(export_sig_DEG_list == TRUE){
-  write.csv(ruv_deg_list_export, file = paste0("Results/DEG/DEG_list_",contrast,".csv"), row.names = FALSE)
-}
+
 
 ```
 
@@ -322,7 +236,7 @@ if(export_sig_DEG_list == TRUE){
 # Plot PCA to check for batch effects
 
 # Prepare the counts
-rlog_dds <- rlog(dds)
+rlog_dds <- rlog(deseq.output$dds)
 
 # Annotation to view PCA by
 PCA.group <- "Date"
@@ -595,62 +509,6 @@ print(heatmap.contrast)
 
 ```
 
-# Volcano Plots
-
-```{r}
-
-# Load the DE results
-contrast_ruv$gene <- rownames(contrast_ruv)
-deg.results.df <- contrast_ruv
-
-# Remove the control probes
-deg.results.df <- deg.results.df[!grepl("^POS_|^NEG_", deg.results.df$gene), ]
-
-
-# Create a column for direction of DEGs
-deg.results.df$de_direction <- "NONE"
-deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
-                             deg.results.df$log2FoldChange > 1] <- "UP"
-deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
-                             deg.results.df$log2FoldChange < -1] <- "DOWN"
-
-deg.results.df$deglabel <- ifelse(deg.results.df$de_direction == "NONE", NA, deg.results.df$gene)
-
-# Compute the scale for the volcano x-axis
-log2.scale <- max(abs(deg.results.df$log2FoldChange))
-
-# Make the volcano plot
-
-volcano.plot <- ggplot(data = deg.results.df, aes(x = log2FoldChange, 
-                                                  y = -log10(padj), 
-                                                  col = de_direction, 
-                                                  label = deglabel)) +
-  geom_vline(xintercept = c(-1, 1), col = "gray", linetype = 'dashed') +
-  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
-  xlim(-7.5, 7.5) + 
-  labs(x = paste(contrast, contrast_levels[[1]], "versus", contrast_levels[[2]]),
-       y = "-log10 adjusted p-value", 
-       title = paste0(contrast, " DE Analysis")) + 
-  geom_point(size = 2) +
-  scale_color_manual(values = c("steelblue4", "grey", "violetred4"), 
-                     labels = c(paste("Downregulated in", contrast_levels[[1]]), "Not significant", paste("Upregulated in", contrast_levels[[1]]))) + 
-  geom_text_repel(max.overlaps = Inf) + 
-  xlim(-log2.scale-1, log2.scale+1) + 
-  theme(plot.title = element_text(hjust = 0.5))
-
-
-export.volcano <- TRUE
-if(export.volcano == TRUE){
-    ggsave(paste0("Results/volcano_", contrast, "_adjpval.png"),
-         plot = volcano.plot, 
-         width = 8, 
-         height = 8, 
-         units = "in")
-}
-
-
-```
-
 
 # Clustering of Viral Gene Probes
 
@@ -664,7 +522,7 @@ library(ggfortify)
 library(PCAtools)
 
 # Transform DESEQ normalized counts to variance stabilized
-vst.dds <- varianceStabilizingTransformation(dds)
+vst.dds <- varianceStabilizingTransformation(deseq.output$dds)
 
 # Gather normalized counts as a df
 normalized.counts <- as.data.frame(assay(vst.dds))
@@ -674,6 +532,13 @@ kshv.genes <- str_detect(rownames(normalized.counts), "^KSHV")
 
 # Subset for KSHV genes
 normalized.counts.kshv <- normalized.counts[kshv.genes, ]
+
+export.kshv.gene.counts <- TRUE
+if(export.kshv.gene.counts == TRUE){
+  
+  write.csv(normalized.counts.kshv, file = "Results/kshv.gene.counts.csv")
+  
+}
 
 # Run PCA
 kshv.pca <- pca(normalized.counts.kshv, 
