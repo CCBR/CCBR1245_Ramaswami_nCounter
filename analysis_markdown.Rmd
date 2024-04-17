@@ -43,7 +43,7 @@ source("R/ncounter_analysis_functions.R")
 
 # Load the annotation file
 #annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
-annotation_file_path <- "4_15_24_ncounter_rna_annotation_edit_NC.xlsx"
+annotation_file_path <- "annotations/4_15_24_ncounter_rna_annotation_edit_NC.xlsx"
 annotation_df <- read_excel(annotation_file_path)
 
 ```
@@ -51,6 +51,8 @@ annotation_df <- read_excel(annotation_file_path)
 ```{r Define the contrast for the DEG analysis, message=FALSE, warning=FALSE}
 
 # Define the contrast and levels from the annotation columns for QC and DEG analysis
+# Levels are: Effect, Reference. 
+# This means a positive log2foldchnage = lower reference, higher effect
 contrasts.list <- list(
   "CD4_count" = c("High", "Low"), 
   "KS_alone" = c("Y", "N"), 
@@ -129,8 +131,10 @@ sum(pval <= .05)
 
 ```{r, message=FALSE, warning=FALSE}
 
-# Create a new folder for the run date
+# Create a new folder for the run date and results
 run.folder <- "4_16_2024/"
+
+results.folder <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/Results/"
 
 for(contrast in names(contrasts.list)){
   
@@ -150,10 +154,13 @@ for(contrast in names(contrasts.list)){
   
   ## Make a volcano plot for the DEGs
   
-  # Remove the control probes
-  deg.results.df <- deseq.output$all.de.results[!grepl("^POS_|^NEG_", 
-                                                       deseq.output$all.de.results), ]
+  # Identify the NEG and POS probes
+  NEG.indices <- grep("NEG_", rownames(deseq.output$all.de.results))
+  POS.indices <- grep("POS_", rownames(deseq.output$all.de.results))
+  control.indices <- c(NEG.indices, POS.indices)
   
+  # Remove the control probes
+  deg.results.df <- deseq.output$all.de.results[-control.indices,]
   
   # Create a column for direction of DEGs
   deg.results.df$de_direction <- "NONE"
@@ -167,8 +174,11 @@ for(contrast in names(contrasts.list)){
   # Compute the scale for the volcano x-axis
   log2.scale <- max(abs(deg.results.df$log2FoldChange))
   
-  # Make the volcano plot
+  # Establish the color scheme for the volcano plot
+  contrast.level.colors <- c("steelblue4", "grey", "violetred4")
+  names(contrast.level.colors) <- c("DOWN", "NONE", "UP")
   
+  # Make the volcano plot
   volcano.plot <- ggplot(data = deg.results.df, aes(x = log2FoldChange, 
                                                     y = -log10(padj), 
                                                     col = de_direction, 
@@ -180,16 +190,16 @@ for(contrast in names(contrasts.list)){
          y = "-log10 adjusted p-value", 
          title = paste0(contrast, " DE Analysis")) + 
     geom_point(size = 2) +
-    scale_color_manual(values = c("steelblue4", "grey", "violetred4"), 
-                       labels = c(paste("Downregulated in", contrast_levels[[1]]), "Not significant",   paste("Upregulated in", contrast_levels[[1]]))) + 
+    scale_color_manual("DE Direction", 
+                       values = contrast.level.colors) + 
     geom_text_repel(max.overlaps = Inf) + 
     xlim(-log2.scale-1, log2.scale+1) + 
     theme(plot.title = element_text(hjust = 0.5))
   
-  
+  # Export the volcano plot
   export.volcano <- TRUE
   if(export.volcano == TRUE){
-      ggsave(paste0("Results/", run.folder, "volcano_", contrast, "_adjpval.png"),
+      ggsave(paste0(results.folder, run.folder, "volcano_", contrast, "_adjpval.png"),
            plot = volcano.plot, 
            width = 8, 
            height = 8, 
@@ -197,7 +207,7 @@ for(contrast in names(contrasts.list)){
   }
   
   # Export Normalized read counts
-  export_norm_counts <- TRUE
+  export_norm_counts <- FALSE
   if(export_norm_counts == TRUE){
     # Grab the normalized_counts
     normalized_counts <- as.data.frame(counts(deseq.output$dds, normalized = TRUE))
@@ -207,7 +217,7 @@ for(contrast in names(contrasts.list)){
     normalized_counts <- cbind(gene, normalized_counts) 
     
     # Export
-    write.csv(normalized_counts, file = paste0("Results/", run.folder, "RUV_normalized_counts.csv"), row.names = FALSE)
+    write.csv(normalized_counts, file = paste0(results.folder, run.folder, "RUV_normalized_counts.csv"), row.names = FALSE)
     
     
   }
@@ -215,7 +225,7 @@ for(contrast in names(contrasts.list)){
   # Export the DE results
   export_sig_DEG_list <- TRUE
   if(export_sig_DEG_list == TRUE){
-    write.csv(deseq.output$deg.list, file = paste0("Results/", run.folder, "DEG_list_",contrast,".csv"), row.names =   FALSE)
+    write.csv(deseq.output$deg.list, file = paste0(results.folder, run.folder, "DEG_list_",contrast,".csv"), row.names =   FALSE)
   }
  
   
@@ -265,31 +275,41 @@ if(export.PCA == TRUE){
 
 ```{r}
 
-normalized_CXCL8 <- set@assayData$counts[rownames(set@assayData$counts) == "CXCL8", ]
+# Grab the normalized counts
+CXCL8_counts <- normalized_counts["CXCL8", ]
 
+# Make the rows as SampleIDs
+CXCL8_df <- as.data.frame(t(CXCL8_counts))
+CXCL8_df$SampleID <- rownames(CXCL8_df)
 
-CXCL8_df <- data.frame(CXCL8_normalized = normalized_CXCL8, SampleID = names(normalized_CXCL8))
-rownames(CXCL8_df) = NULL
-
-CXCL8_anno_columns <- c("SampleID","KS_alone","CD4_group")
+# Set up the annotations
+CXCL8_anno_columns <- c("SampleID","KS_alone","CD4_count","response")
 subset_anno_df <- annotation_df[CXCL8_anno_columns]
 
+# Correct SampleID names in annotation df
+subset_anno_df <- subset_anno_df %>% mutate(SampleID = str_replace_all(SampleID, "-", " "))
 
+# Create a master df
 CXCL8_df <- merge(CXCL8_df, subset_anno_df, by = "SampleID")
 
-CXCL8_mean_KS_Y <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$KS_alone == "Y"], na.rm = TRUE)
-CXCL8_mean_KS_N <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$KS_alone == "N"], na.rm = TRUE)
+CXCL8_mean_KS_Y <- mean(CXCL8_df$CXCL8[CXCL8_df$KS_alone == "Y"], na.rm = TRUE)
+CXCL8_mean_KS_N <- mean(CXCL8_df$CXCL8[CXCL8_df$KS_alone == "N"], na.rm = TRUE)
 
 CXCL8_df$KS_alone_mean <- ifelse(CXCL8_df$KS_alone == "Y", CXCL8_mean_KS_Y, CXCL8_mean_KS_N)
 
-CXCL8_mean_CD4_High <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$CD4_group == "High"], na.rm = TRUE)
-CXCL8_mean_CD4_Low <- mean(CXCL8_df$CXCL8_normalized[CXCL8_df$CD4_group == "Low"], na.rm = TRUE)
+CXCL8_mean_CD4_High <- mean(CXCL8_df$CXCL8[CXCL8_df$CD4_count == "High"], na.rm = TRUE)
+CXCL8_mean_CD4_Low <- mean(CXCL8_df$CXCL8[CXCL8_df$CD4_count == "Low"], na.rm = TRUE)
 
-CXCL8_df$CD4_group_mean <- ifelse(CXCL8_df$CD4_group == "High", CXCL8_mean_CD4_High, CXCL8_mean_CD4_Low)
+CXCL8_df$CD4_count_mean <- ifelse(CXCL8_df$CD4_count == "High", CXCL8_mean_CD4_High, CXCL8_mean_CD4_Low)
+
+CXCL8_mean_response_Y <- mean(CXCL8_df$CXCL8[CXCL8_df$response == "Y"], na.rm = TRUE)
+CXCL8_mean_response_N <- mean(CXCL8_df$CXCL8[CXCL8_df$response == "N"], na.rm = TRUE)
+
+CXCL8_df$response_mean <- ifelse(CXCL8_df$response == "Y", CXCL8_mean_response_Y, CXCL8_mean_response_N)
 
 
 
-CXCL8_deg <- ruv_deg_list_export[ruv_deg_list_export$gene == "CXCL8", ]
+#CXCL8_deg <- ruv_deg_list_export[ruv_deg_list_export$gene == "CXCL8", ]
 
 export_CXCL8_summary <- FALSE
 if(export_CXCL8_summary == TRUE){
