@@ -533,10 +533,14 @@ kshv.genes <- str_detect(rownames(normalized.counts), "^KSHV")
 # Subset for KSHV genes
 normalized.counts.kshv <- normalized.counts[kshv.genes, ]
 
-export.kshv.gene.counts <- TRUE
+# Transpose gene counts
+normalized.counts.kshv.transpose <- as.data.frame(t(normalized.counts.kshv))
+
+export.kshv.gene.counts <- FALSE
 if(export.kshv.gene.counts == TRUE){
   
-  write.csv(normalized.counts.kshv, file = "Results/kshv.gene.counts.csv")
+  write.csv(normalized.counts.kshv, file = "Results/kshv_counts_samples_as_columns.csv")
+  write.csv(normalized.counts.kshv.transpose, file = "Results/kshv_counts_samples_as_rows.csv")
   
 }
 
@@ -561,9 +565,6 @@ kshv_annotation <- as.data.frame(read_excel("kshv_genes_annotation.xlsx"))
 
 rownames(kshv_annotation) <- kshv_annotation$gene
 
-# Transpose gene counts
-normalized.counts.kshv.transpose <- as.data.frame(t(normalized.counts.kshv))
-
 # Ensure the rows and columns of the metadata and counts are aligned
 kshv_annotation <- kshv_annotation[order(rownames(kshv_annotation)), ]
 normalized.counts.kshv.transpose <- normalized.counts.kshv.transpose[ order(colnames(normalized.counts.kshv.transpose))]
@@ -581,7 +582,7 @@ kshv.pca.plot.by.gene <- biplot(kshv.pca.by.gene,
        legendLabSize = 16, 
        legendIconSize = 8.0)
 
-export.PCA <- TRUE
+export.PCA <- FALSE
 if(export.PCA == TRUE){
   
   ggsave(paste0("Results/QC/kshv_pca_plot_by_sample_", contrast, ".png"),
