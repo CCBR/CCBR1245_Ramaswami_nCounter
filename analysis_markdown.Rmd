@@ -43,8 +43,9 @@ source("R/ncounter_analysis_functions.R")
 
 # Load the annotation file
 #annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
-annotation_file_path <- "annotations/4_15_24_ncounter_rna_annotation_edit_NC.xlsx"
-annotation_df <- read_excel(annotation_file_path)
+annotation_file_path <- "annotations/5_20_24_ncounter_rna_annotation_edit_NC.csv"
+#annotation_df <- read_excel(annotation_file_path)
+annotation_df <- read.csv(annotation_file_path)
 
 ```
 
@@ -54,22 +55,30 @@ annotation_df <- read_excel(annotation_file_path)
 # Levels are: Effect, Reference. 
 # This means a positive log2foldchnage = lower reference, higher effect
 contrasts.list <- list(
-  "CD4_count" = c("High", "Low"), 
-  "KS_alone" = c("Y", "N"), 
+  "CD4_count_200" = c("High", "Low"), 
+  "CD4_count_175" = c("High", "Low"), 
+  "CD4_count_150" = c("High", "Low"), 
+  "KS_alone" = c("N", "Y"), 
   "KSHV_VL" = c("1", "0"), 
   "HIV_VL" = c("Y", "N"), 
-  "response" = c("Y", "N")
+  "response" = c("Y", "N"), 
+  "kshv_expression_median" = c("above", "below")
+)
+
+# For running a single contrast
+contrasts.list <- list(
+  "kshv_expression_median" = c("above", "below")
 )
 
 #contrast <- "CD4_group"
-#contrast <- "KS_alone"
+contrast <- "KS_alone"
 #contrast <- "KSHV_VL_Bin"
 
 
-# Levels are: Reference, Effect. 
+# Levels are: Effect, Reference. 
 # This means a positive log2foldchnage = lower reference, higher effect
 #contrast_levels <- c("High", "Low")
-#contrast_levels <- c("Y", "N")
+contrast_levels <- c("N", "Y")
 #contrast_levels <- c("0", "1")
 
 
@@ -132,7 +141,7 @@ sum(pval <= .05)
 ```{r, message=FALSE, warning=FALSE}
 
 # Create a new folder for the run date and results
-run.folder <- "4_16_2024/"
+run.folder <- "5_20_2024/"
 
 results.folder <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/Results/"
 
@@ -207,7 +216,7 @@ for(contrast in names(contrasts.list)){
   }
   
   # Export Normalized read counts
-  export_norm_counts <- FALSE
+  export_norm_counts <- TRUE
   if(export_norm_counts == TRUE){
     # Grab the normalized_counts
     normalized_counts <- as.data.frame(counts(deseq.output$dds, normalized = TRUE))
@@ -222,17 +231,18 @@ for(contrast in names(contrasts.list)){
     
   }
   
-  # Export the DE results
+  # Export the DEG list
   export_sig_DEG_list <- TRUE
   if(export_sig_DEG_list == TRUE){
     write.csv(deseq.output$deg.list, file = paste0(results.folder, run.folder, "DEG_list_",contrast,".csv"), row.names =   FALSE)
   }
+  
+  # Export all DE results
+  export_DE_results <- TRUE
+  if(export_DE_results == TRUE){
+    write.csv(deg.results.df, file = paste0(results.folder, run.folder, "DE_results_",contrast,".csv"), row.names =   FALSE)
+  }
  
-  
-  
-  
-  
-   
 }
 
 
@@ -249,7 +259,7 @@ for(contrast in names(contrasts.list)){
 rlog_dds <- rlog(deseq.output$dds)
 
 # Annotation to view PCA by
-PCA.group <- "Date"
+PCA.group <- "kshv_expression_median"
 
 # PCA Plot
 PCA.plot <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 700)
@@ -513,7 +523,7 @@ heatmap.contrast <- pheatmap(log.norm.counts[goi, ],
 export.heatmap.contrast <- TRUE
 if(export.heatmap.contrast == TRUE){
   
-  ggsave(paste0("Results/heatmap_", contrast, ".png"),
+  ggsave(paste0(results.folder, run.folder, "heatmap_", contrast, ".png"),
          plot = heatmap.contrast, 
          width = 12, 
          height = 12, 
@@ -618,5 +628,43 @@ if(export.PCA == TRUE){
          units = "in")
   
 }
+
+```
+
+```{r Divide samples by KSHV average expression}
+
+# Determine the averge per sample
+average.kshv.counts <- colMeans(normalized.counts.kshv)
+
+# Set up a data frame for determining groups
+avg.kshv.df <- data.frame(SampleID = names(average.kshv.counts), 
+                          meanKSHV = unname(average.kshv.counts))
+
+# Find the median of all samples' average KSHV gene expression
+median.kshv <- median(avg.kshv.df$meanKSHV)
+
+# Assign samples to high or low groups based on the median KSHV average
+avg.kshv.df <- avg.kshv.df %>% 
+  mutate(kshv_expression_median = ifelse(meanKSHV > median.kshv, "above", "below"))
+
+
+
+
+# Merge with the annotation
+annotation_df_cleaned <- annotation_df %>% 
+  mutate(SampleID = str_replace_all(SampleID, "-", " "))
+
+annotation.update <- merge(annotation_df_cleaned, avg.kshv.df, by = "SampleID")
+
+# Export a new annotation with kshv group assignments
+export.annotation <- TRUE
+if(export.annotation == TRUE){
+  
+  write.csv(annotation.update,
+             paste0("annotations/5_20_24_ncounter_rna_annotation_edit_NC.csv"), 
+            row.names = FALSE)
+  
+}
+
 
 ```
