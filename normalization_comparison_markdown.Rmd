@@ -35,10 +35,10 @@ library(plotly)
 setwd("/home/cauleyes/ccbr-data/users/Ned/nCounter_rna/CCBR1245_Ramaswami_nCounter")
 
 # Functions for RUVseq analysis
-source("R/nanostring_RUV_functions.R")
+source("R/ncounter_analysis_functions.R")
 
 # Load the annotation file
-annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
+annotation_file_path <- "annotations/5_2_24_ncounter_rna_annotation_edit_NC.xlsx"
 annotation_df <- read_excel(annotation_file_path)
 
 ```
@@ -277,7 +277,7 @@ ruv_deg_list_export$normalization <- "RUVseq"
 
 
 # Export Normalized read counts
-export_norm_counts <- TRUE
+export_norm_counts <- FALSE
 if(export_norm_counts == TRUE){
   # Grab the normalized_counts
   normalized_counts <- as.data.frame(counts(dds, normalized = TRUE))
@@ -314,7 +314,7 @@ print(PCA.plotly)
 
 # Export the PCA plot
 
-export.PCA <- TRUE
+export.PCA <- FALSE
 if(export.PCA == TRUE){
   ggsave(paste0("Results/QC/PCA.pdf"), plot = PCA.plot)
 }
