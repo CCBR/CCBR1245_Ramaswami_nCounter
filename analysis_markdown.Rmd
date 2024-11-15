@@ -1,7 +1,7 @@
 ---
 title: "nCounter_RNA_Analysis"
 author: "Ned Cauley"
-date: "4/16/24"
+date: "8/5/24"
 output: html_document
 ---
 
@@ -15,7 +15,9 @@ knitr::opts_chunk$set(echo = TRUE)
 ## Set up libraries and QC functions libraries
 
 ```{r Libraries and RUVseq functions, message=FALSE, warning=FALSE}
-library(NanoStringQCPro)
+#library(NanoStringQCPro)
+#library(NanoStringNorm)
+
 library(ggplot2)
 library(EnvStats)
 library(MASS)
@@ -23,31 +25,31 @@ library(RUVSeq)
 library(DESeq2)
 library(limma)
 library(matrixStats)
-library(limma)
-library(NanoStringNorm)
 library(readxl)
 library(plotly)
 library(pheatmap)
 library(ggrepel)
 library(gridExtra)
 library(grid)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(stringr)
+library(ggfortify)
+library(PCAtools)
+library(ggpubr)
 
-
-# The library in RSW to use is located at
-# /home/cauleyes/ccbr-data/renv_cache/ncounter_rna/Snapshot-environment_method/renv/library/R-4.1/x86_64-pc-linux-gnu
-
-# Set the working directory to your project folder if it is not set already
-setwd("/home/cauleyes/ccbr-data/users/Ned/nCounter_rna/CCBR1245_Ramaswami_nCounter")
-
-# Functions for RUVseq analysis
-#source("R/nanostring_RUV_functions.R")
 source("R/ncounter_analysis_functions.R")
 
 # Load the annotation file
-#annotation_file_path <- "ncounter_rna_annotation_edit_correction_RR.xlsx"
-annotation_file_path <- "annotations/5_20_24_ncounter_rna_annotation_edit_NC.csv"
-#annotation_df <- read_excel(annotation_file_path)
-annotation_df <- read.csv(annotation_file_path)
+annotation_file_path <- "5_20_24_ncounter_rna_annotation_edit_NC.csv"
+annotation.df <- read.csv(annotation_file_path)
+
+
+# Create a new folder for the run date and results
+run.folder <- "11_13_2024/all/"
+
+results.folder <- "results/"
 
 ```
 
@@ -66,90 +68,14 @@ contrasts.list <- list(
   "kshv_expression_median" = c("above", "below")
 )
 
-
-
-# For running a single contrast
-#contrasts.list <- list(
-  "kshv_expression_median" = c("above", "below")
-#)
-
-#contrast <- "CD4_group"
-#contrast <- "KS_alone"
-#contrast <- "KSHV_VL_Bin"
-
-
-# Levels are: Effect, Reference. 
-# This means a positive log2foldchnage = lower reference, higher effect
-#contrast_levels <- c("High", "Low")
-#contrast_levels <- c("N", "Y")
-#contrast_levels <- c("0", "1")
-
-
-
-
-
 ```
 
 
-## Setup the initial dataframes with read counts and metadata/QC
+## Load the processed read counts
 
 ```{r Initial Dataframes and QC,  message=FALSE, warning=FALSE}
 
-rcc.files.path <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc"
-
-# Gather the names of the RCC files
-#files.RCC = list.files("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/data/CCBR1245/rcc")
-
-# Process the RCC files as count, metadata, and feature data DFs
-rcc.dfs <- process_RCC_files(rcc.files.path = rcc.files.path, 
-                  annotation.df = annotation_df)
-
-# Print a sumnmary of the DFs
-head(rcc.dfs$raw.counts)
-head(rcc.dfs$pData)
-head(rcc.dfs$fData)
-
-```
-
-## Verify that housekeeping genes are not DEGs
-
-```{r, message=FALSE, warning=FALSE}
-###
-#### CHECK IF HK ARE ASSOCIATED WITH PRIMARY PHENO
-###
-
-# Gather the read counts for housekeeping genes
-hk_raw = rcc.dfs$raw.counts[rcc.dfs$hk.gene.list,]
-pval = vector(length = nrow(hk_raw))
-
-print("Housekeeping genes:")
-print(rownames(hk_raw))
-
-# Run general linear model to get pvalue for housekeeping
-for (contrast in names(contrasts.list)) {
-  
-  for (i in 1:nrow(hk_raw)){
-  
-  reg = glm.nb(as.numeric(hk_raw[i,]) ~ as.factor(rcc.dfs$pData[[contrast]]))
-  pval[i] = coef(summary(reg))[2,4]
-  
-
-  
-  print("Number of housekeeping genes that are DE:")
-  sum(pval <= .05)
-  
-}
-  
-  
-}
-
-
-#print("Housekeeping genes:")
-#print(rownames(hk_raw))
-
-# Number of housekeeping that are DE
-#print("Number of housekeeping genes that are DE:")
-#sum(pval <= .05)
+load(file = "ncounter_processed_rcc_counts.rda")
 
 ```
 
@@ -157,209 +83,421 @@ for (contrast in names(contrasts.list)) {
 
 ```{r, message=FALSE, warning=FALSE}
 
-# Create a new folder for the run date and results
-run.folder <- "7_17_2024/"
+# Toggles for analysis and plots
+run.de <- TRUE
+export.de.results <- FALSE
+export.norm.counts <- FALSE
+create.volcano <- FALSE
+export.volcano <- FALSE
+create.heatmap <- FALSE
+export.heatmap <- FALSE
+export.gsea.input = FALSE
+export.PCA <- FALSE
 
-results.folder <- "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/Results/"
 
+# Start a vector of HK genes to use
+hk.final.list <- rcc.dfs$hk.gene.list
+
+# Check if any HKs are DE between groups
 for(contrast in names(contrasts.list)){
   
-  contrast.levels <- contrasts.list[[contrast]]
+  hk.genes.checked <- check_hk_for_de(hk.genes = rcc.dfs$hk.gene.list, 
+                                        raw.counts = rcc.dfs$raw.counts, 
+                                        annotation = rcc.dfs$pData, 
+                                        contrast.field = contrast)
   
-  # Run DESEQ with RUVseq normalization for k sources of variability
-  deseq.output <- run_RUV_DESEQ2(contrast = contrast, 
-                 contrast.levels = contrast.levels, 
-                 annotation.data = rcc.dfs$pData, 
-                 raw.counts = rcc.dfs$raw.counts, 
-                 feature.data = rcc.dfs$fData, 
-                 k = 1, 
-                 additional.covar = NULL, 
-                 hk.genes = rcc.dfs$hk.gene.list, 
-                 exclude.hk.genes = NULL)
+  # Remove HK from the final list if found to be a DEG
+  hk.final.list <- setdiff(hk.final.list, hk.genes.checked$hk.degs)
   
+}
+
+# Retrieve KSHV genes
+kshv.genes <- rownames(rcc.dfs$raw.counts[grep("KSHV", rownames(rcc.dfs$raw.counts)), ])
+kshv.genes <- c(kshv.genes, "ORF75")
+
+# Toggle to rerun analysis
+de.results.list <- list()
+
+# Run each DE contrast
+if(run.de == TRUE){
   
-  ## Make a volcano plot for the DEGs
+  for(contrast in names(contrasts.list)){
+    
+    contrast.levels <- contrasts.list[[contrast]]
+    
+    # Run DESEQ with RUVseq normalization for k sources of variability
+    deseq.output <- run_RUV_DESEQ2(contrast = contrast, 
+                   contrast.levels = contrast.levels, 
+                   annotation.data = rcc.dfs$pData, 
+                   raw.counts = rcc.dfs$raw.counts, 
+                   feature.data = rcc.dfs$fData, 
+                   k = 1, 
+                   additional.covar = NULL, 
+                   hk.genes = hk.genes.checked$hk.genes.final)
+    
+    de.results.list[[contrast]] <- deseq.output
+    
+    
+    # Export all DE results
+    if(export.de.results == TRUE){
+      write.csv(deseq.output$all.de.results, file = paste0(results.folder, run.folder,   "DE_results_",contrast,".csv"), row.names =   FALSE)
+    }
+    
+    # Gather normalized counts
+    normalized.counts <- as.data.frame(counts(de.results.list[[contrast]]$dds, normalized = TRUE))
+    # Add a gene column
+    gene <- rownames(normalized.counts)
+    normalized.counts <- cbind(gene, normalized.counts) 
   
-  # Identify the NEG and POS probes
-  NEG.indices <- grep("NEG_", rownames(deseq.output$all.de.results))
-  POS.indices <- grep("POS_", rownames(deseq.output$all.de.results))
-  control.indices <- c(NEG.indices, POS.indices)
-  
-  # Remove the control probes
-  deg.results.df <- deseq.output$all.de.results[-control.indices,]
-  
-  # Create a column for direction of DEGs
-  deg.results.df$de_direction <- "NONE"
-  deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
-                               deg.results.df$log2FoldChange > 1] <- "UP"
-  deg.results.df$de_direction[deg.results.df$padj < 0.05 & 
-                               deg.results.df$log2FoldChange < -1] <- "DOWN"
-  
-  deg.results.df$deglabel <- ifelse(deg.results.df$de_direction == "NONE", NA, deg.results.df$gene)
-  
-  # Compute the scale for the volcano x-axis
-  log2.scale <- max(abs(deg.results.df$log2FoldChange))
-  
-  # Establish the color scheme for the volcano plot
-  contrast.level.colors <- c("steelblue4", "grey", "violetred4")
-  names(contrast.level.colors) <- c("DOWN", "NONE", "UP")
-  
-  # Make the volcano plot
-  volcano.plot <- ggplot(data = deg.results.df, aes(x = log2FoldChange, 
-                                                    y = -log10(padj), 
-                                                    col = de_direction, 
-                                                    label = deglabel)) +
-    geom_vline(xintercept = c(-1, 1), col = "gray", linetype = 'dashed') +
-    geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
-    xlim(-7.5, 7.5) + 
-    labs(x = paste(contrast, contrast.levels[[1]], "versus", contrast.levels[[2]]),
-         y = "-log10 adjusted p-value", 
-         title = paste0(contrast, " DE Analysis")) + 
-    geom_point(size = 2) +
-    scale_color_manual("DE Direction", 
-                       values = contrast.level.colors) + 
-    geom_text_repel(max.overlaps = Inf) + 
-    xlim(-log2.scale-1, log2.scale+1) + 
-    theme(plot.title = element_text(hjust = 0.5))
-  
-  # Export the volcano plot
-  export.volcano <- TRUE
-  if(export.volcano == TRUE){
-      ggsave(paste0(results.folder, run.folder, "volcano_", contrast, "_adjpval.png"),
-           plot = volcano.plot, 
-           width = 8, 
-           height = 8, 
-           units = "in")
   }
   
   # Export Normalized read counts
-  export_norm_counts <- FALSE
-  if(export_norm_counts == TRUE){
-    # Grab the normalized_counts
-    normalized_counts <- as.data.frame(counts(deseq.output$dds, normalized = TRUE))
-    
-    # Add a gene column
-    gene <- rownames(normalized_counts)
-    normalized_counts <- cbind(gene, normalized_counts) 
-    
-    # Export
-    write.csv(normalized_counts, file = paste0(results.folder, run.folder, "RUV_normalized_counts.csv"), row.names = FALSE)
-    
-    
-  }
-  
-  # Export the DEG list
-  export_sig_DEG_list <- TRUE
-  if(export_sig_DEG_list == TRUE){
-    write.csv(deseq.output$deg.list, file = paste0(results.folder, run.folder, "DEG_list_",contrast,".csv"), row.names =   FALSE)
-  }
-  
-  # Export all DE results
-  export_DE_results <- FALSE
-  if(export_DE_results == TRUE){
-    write.csv(deg.results.df, file = paste0(results.folder, run.folder, "DE_results_",contrast,".csv"), row.names =   FALSE)
-  }
-  
-  
-  # Create a heatmap for the DEGs from the DEG contrast
+  if(export.norm.counts == TRUE){
 
-  # Get a list of the DEGS
-  rownames(deseq.output$deg.list) <- deseq.output$deg.list$gene
-  contrast_deg_list <-   rownames(deseq.output$deg.list[deseq.output$deg.list$padj < 0.05,   ])
-  
-  subtitle <- "padj < 0.05"
-  
-  # Loosen the cutoff if only 1 DEG found (causes an error in pheatmap)
-  if(length(contrast_deg_list) < 1){ 
+    write.csv(normalized.counts, file = paste0(results.folder, 
+    run.folder,   
+    "RUV_normalized_counts.csv"), 
+    row.names = FALSE)
     
-    print("No DEGs found for padj < 0.05, trying pvalue < 0.05")
+  }
+
+}
+```
+
+### Plots
+
+#### Volcano Plot
+
+```{r}
+# Create plots per contrast
+
+# Volcano plot
+if(create.volcano == TRUE){
+  
+  volcano.list <- list()
+  
+  for(contrast in names(de.results.list)){
     
-    contrast_deg_list <-   rownames(deseq.output$deg.list[deseq.output$deg.list$pvalue < 0.05,
-                  ])
-    subtitle <- "p-value < 0.05"
+    # Standard volcano
+    volcano.output <- make_volcano(de.results = de.results.list[[contrast]]$all.de.results,
+                                   title = contrast, 
+                                   legend.title = paste0("Expression in ", contrast.levels[1]), 
+                                   x.axis.title = "log2 Fold Change", 
+                                   fc.limit = 1, 
+                                   custom.gene.labels = NULL, 
+                                   remove.controls = TRUE, 
+                                   remove.genes = kshv.genes)
+    
+    volcano.list[[contrast]] <- volcano.output
+    
+    # Export the volcano plot
+    if(export.volcano == TRUE){
+        ggsave(paste0(results.folder, run.folder, "volcano_", contrast, "_adjpval.png"),
+             plot = volcano.output$volcano.plot, 
+             width = 8, 
+             height = 8, 
+             units = "in")
+    }
+  
     
   }
   
-  # Remove the positive and negative probes
-  # Identify the NEG and POS probes
-  NEG.indices <- grep("NEG_", contrast_deg_list)
-  POS.indices <- grep("POS_", contrast_deg_list)
-  control.indices <- c(NEG.indices, POS.indices)
-  
-  # Remove the control probes
-  if(length(control.indices) > 0){
-    goi <- contrast_deg_list[-control.indices]
-  } else{
-    goi <- contrast_deg_list
-  }
-  
-  
-  # Gather the annotation for the contrast
-  anno.columns <- c(contrast)
-  annotation_df <- as.data.frame(annotation_df)
-  
-  # Ensure the row names are the sample names
-  rownames(annotation_df) <- annotation_df$SampleID
-  contrast.annotation <- annotation_df[ ,anno.columns, drop = FALSE]
-  
-  # Subset heatmap annotation for any samples taken out in counts
-  # Gather the samples in both
-  anno.samples.rownames <- rownames(contrast.annotation)
-  counts.samples.colnames <- colnames(deseq.output$dds)
+}
 
-  # Find the samples that are present in both
-  matching_names <- intersect(anno.samples.rownames, counts.samples.colnames)
+```
 
-  # Subset counts to include only overlapping samples
-  heatmap.annotation <- contrast.annotation[matching_names, , drop = FALSE]
-  
-  # Order by contrast level
-  heatmap.annotation <- heatmap.annotation[order(heatmap.annotation[1]), , drop = FALSE]
-  
-  # Reorder the data columns to they match the annotation row order
-  row.order <- rownames(heatmap.annotation)
-  
-  log.norm.counts <- log2(counts(deseq.output$dds, normalized = TRUE) + 1)
-  log.norm.counts <- log.norm.counts[, row.order]
-  
-  # Define the annotation colors for the contrast
-  anno.colors <- setNames(list(c("cyan", "magenta")), contrast)
-  
-  # Assign the levels to the colors
-  anno.colors[[contrast]] <- setNames(anno.colors[[contrast]], contrast.levels)
+#### Heatmap
 
+```{r}
+
+# Heatmap
+if(create.heatmap == TRUE){
   
-  heatmap.contrast <- pheatmap(log.norm.counts[goi, ], 
-           main = paste0(contrast, "DEGs (", subtitle, ")"), 
-           show_rownames = TRUE, 
-           scale = "row", 
-           show_colnames = TRUE,
-           border_color = NA, 
-           cluster_rows = TRUE, 
-           cluster_cols = FALSE, 
-           clustering_method = "average", 
-           clustering_distance_rows = "correlation", 
-           clustering_distance_cols = "correlation", 
-           color = colorRampPalette(c("blue", "white", "red"))(120),   
-           annotation_row = NA, 
-           annotation_col = heatmap.annotation, 
-           annotation_colors = anno.colors
-           )
+  heatmap.list <- list()
   
-  
-  export.heatmap.contrast <- TRUE
-  if(export.heatmap.contrast == TRUE){
+  for(contrast in names(de.results.list)){
     
-    ggsave(paste0(results.folder, run.folder, "heatmap_", contrast,   ".png"),
-           plot = heatmap.contrast, 
+    contrast.levels <- contrasts.list[[contrast]]
+  
+    heatmap.output <- make_heatmap(deseq.output = de.results.list[[contrast]], 
+                                    contrast = contrast, 
+                                    contrast.levels = contrast.levels, 
+                                    annotation = annotation.df, 
+                                    remove.genes = kshv.genes, 
+                                    cluster.rows = TRUE, 
+                                    show.row.names = TRUE, 
+                                    cluster.cols = TRUE, 
+                                    show.col.names = FALSE)
+    
+    heatmap.list[[contrast]] <- heatmap.output
+    
+    
+    if(export.heatmap == TRUE){
+    
+      ggsave(paste0(results.folder, run.folder, "heatmap_", contrast, ".png"),
+           plot = heatmap.output$heatmap.contrast, 
            width = 12, 
            height = 12, 
            units = "in")
+      }
+    
+    
     
   }
- 
+  
 }
 
+
+```
+
+### Preranked List for GSEA
+
+```{r}
+
+# Create a ranked list of genes for use in GSEA
+gsea.preranked.df <- create_GSEA_preranked(counts = normalized.counts, 
+                                           annotation = annotation.df, 
+                                           contrast = contrast, 
+                                           contrast.levels = contrast.levels)
+
+# Export GSEA pre-ranked gene list
+if(export.gsea.input == TRUE){
+  write.csv(gsea.preranked.df, file = paste0(results.folder, run.folder, "GSEA/",   contrast, "_gsea_preranked_input.csv"), row.names = FALSE)
+      
+    }
+
+```
+
+# Load previously generated normalized counts
+
+```{r}
+
+normalized.counts <- read.csv(paste0(results.folder, 
+                                     run.folder, 
+                                     "RUV_normalized_counts.csv"))
+
+# Fix column names to match annotation sheet
+colnames(normalized.counts) <- gsub("\\."," ", colnames(normalized.counts))
+
+# Add row names
+rownames(normalized.counts) <- normalized.counts$gene
+
+```
+
+# Read count information for specific genes
+
+```{r}
+
+#Create a combined violin and boxplot
+
+# Cytokine genes
+cytokine.genes <- normalized.counts[grep("^IL", normalized.counts$gene), ]$gene
+
+cytokine.genes <- c(cytokine.genes, "TNF", "IFNA1", "IFNG", "IRF4")
+
+KS.alone.cytokine.boxplot <- gene_counts_violin_boxplot(counts = normalized.counts,
+                                               annotation.df = annotation.df, 
+                                               gene.list = cytokine.genes,
+                                               annotation.field = "KS_alone", 
+                                               display.summary.stat = FALSE, 
+                                               compare.groups = TRUE)
+
+multi.diagnosis.groups <- c("KS, KICS", 
+                           "KS, MCD", 
+                           "KS, MCD, PEL", 
+                           "KS, PEL")
+
+cytokine.boxplot.list <- list()
+
+for(group in multi.diagnosis.groups){
+  
+  compare.groups <- c("KS", group)
+  
+  annotation.subset <- annotation.df %>% 
+    filter(Diagnosis %in% compare.groups)
+  
+  group.boxplot <- gene_counts_violin_boxplot(counts = normalized.counts,
+                                               annotation.df = annotation.subset, 
+                                               gene.list = cytokine.genes,
+                                               annotation.field = "Diagnosis", 
+                                               display.summary.stat = FALSE, 
+                                               compare.groups = TRUE)
+  
+  cytokine.boxplot.list[[group]] <- group.boxplot
+  
+}
+
+
+
+
+```
+
+# Boxplots of Viral Gene Probes
+
+```{r}
+
+# Boxplot of Lytic versus Latent for individual samples
+
+# Identify the KSHV genes
+kshv.genes <- grep("KSHV", normalized.counts$gene)
+kshv.genes <- c(kshv.genes, grep("ORF75", normalized.counts$gene))
+
+# Subset for KSHV genes
+normalized.counts.kshv <- normalized.counts[kshv.genes, ]
+normalized.counts.notkshv <- normalized.counts %>% 
+  slice(-kshv.genes)
+
+# Convert KSHV gene counts to log2 for plotting
+normalized.log.counts.kshv <- normalized.counts.kshv %>% 
+  mutate(across(where(is.numeric), log2))
+
+# Load the KSHV gene annotation
+kshv.annotation <- as.data.frame(read_excel("annotations/kshv_genes_annotation.xlsx"))
+
+# Merge into a master DF
+kshv.df <- merge(normalized.log.counts.kshv, kshv.annotation, by = "gene")
+
+
+# Melt the df to a long version
+kshv.df.long <- kshv.df %>%
+    pivot_longer(cols = starts_with("SB"), names_to = "sample", values_to = "count")
+
+# Gather the sample names
+sample.names <- colnames(kshv.df)[grep("SB", colnames(kshv.df))]
+
+for(ID in sample.names){
+  
+  # Filter for a specific sample
+  kshv.df.sample <- kshv.df.long %>% filter(sample == ID)
+  
+  # Make a boxplot of lytic versus latent
+  kshv.boxplot.type <- ggplot(kshv.df.sample, aes(x = type, y = count)) +
+    geom_boxplot() +
+    labs(title = paste0("Lytic vs Latent KSHV genes for ", ID),
+         x = NULL,
+         y = "Count")
+  
+  kshv.boxplot.all <- ggplot(kshv.df.sample, aes(x = sample, y = count)) +
+    geom_boxplot() +
+    labs(title = paste0("All KSHV gene counts for ", ID),
+         x = NULL,
+         y = "Count")
+  
+  # Combine into a single image
+  ID.combined.boxplot <- grid.arrange(kshv.boxplot.all, kshv.boxplot.type, ncol = 2)
+  
+  # Save the plot
+  export.kshv.boxplot <- FALSE
+  if(export.kshv.boxplot == TRUE){
+    
+    ggsave(paste0(results.folder, "kshv_genes/", run.folder, ID, "_kshv_genes_boxplot.png"), 
+        plot = ID.combined.boxplot, 
+        width = 8, 
+        height = 8, 
+        units = "in")
+    
+  }
+  
+}
+
+kshv.boxplot.all.samples <- ggplot(kshv.df.long, aes(x = sample, y = count)) +
+  geom_boxplot() +
+  labs(title = "Lytic vs Latent Gene Counts by Sample",
+         x = "Gene Type",
+         y = "Count") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+export.kshv.boxplot <- FALSE
+  if(export.kshv.boxplot == TRUE){
+    ggsave(paste0(results.folder, "kshv_genes/", run.folder, "kshv_all_boxplot.png"), 
+        plot = kshv.boxplot.all.samples, 
+        width = 14, 
+        height = 8, 
+        units = "in")
+  }
+
+
+# Combine sample and type
+kshv.df.long$sample_type <- paste0(kshv.df.long$sample, "_", kshv.df.long$type)
+
+# Add annotation for faceting
+facet.field <- "CD4_count_200"
+
+subset.fields <- c("SampleID", facet.field)
+
+annotation.facet <- annotation.df %>% 
+  select(all_of(subset.fields))
+
+kshv.df.long.facet <- merge(kshv.df.long, 
+                            annotation.facet, 
+                            by.x = "sample", 
+                            by.y = "SampleID")
+
+# Boxplots faceted fro specific annotation groups
+
+# By Sample
+
+kshv.boxplot.facet.sample <- ggplot(kshv.df.long.facet, aes(x = sample, y = count, color = type)) +
+  geom_boxplot() +
+  labs(title = paste0("KSHV Gene Counts for ", facet.field),
+         x = "Sample",
+         y = "Log Counts") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5)) + 
+  facet_wrap(~ .data[[facet.field]], scales = "free_x")
+
+export.kshv.boxplot <- FALSE
+  if(export.kshv.boxplot == TRUE){
+    ggsave(paste0(results.folder, run.folder, "kshv_type_boxplot_", facet.field, ".png"), 
+        plot = kshv.boxplot.facet.sample, 
+        width = 14, 
+        height = 8, 
+        units = "in")
+  }
+
+
+# By total annotation group
+
+kshv.boxplot.facet.total <- ggplot(kshv.df.long.facet, aes(x = .data[[facet.field]], y = count, color = type)) +
+  geom_boxplot() +
+  labs(title = paste0("KSHV Gene Counts for ", facet.field),
+         x = "Sample",
+         y = "Log Counts") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5)) + 
+  facet_wrap(~ .data[[facet.field]], scales = "free_x")
+
+export.kshv.boxplot <- FALSE
+  if(export.kshv.boxplot == TRUE){
+    ggsave(paste0(results.folder, run.folder, "kshv_type_boxplot_total_", facet.field, ".png"), 
+        plot = kshv.boxplot.facet.total, 
+        width = 14, 
+        height = 8, 
+        units = "in")
+  }
+
+# Boxplot by KSHV Gene
+
+kshv.genes.boxplot <- ggplot(kshv.df.long, aes(x = gene, y = count, color = type)) +
+  geom_boxplot() +
+  labs(title = paste0("KSHV Gene Counts for all Samples"),
+         x = "KSHV Gene",
+         y = "Log2 Count") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5))
+
+export.kshv.boxplot <- FALSE
+  if(export.kshv.boxplot == TRUE){
+    ggsave(paste0(results.folder, "kshv_genes/", run.folder, "kshv_genes_boxplot.png"), 
+        plot = kshv.genes.boxplot, 
+        width = 14, 
+        height = 8, 
+        units = "in")
+  }
+
+
+
+export.kshv.df <- FALSE
+  if(export.kshv.df == TRUE){
+    write.csv(kshv.df, file = paste0(results.folder, run.folder, "kshv_gene_df.csv"), row.names = FALSE)
+  }
 
 
 ```
@@ -371,16 +509,16 @@ for(contrast in names(contrasts.list)){
 # Plot PCA to check for batch effects
 
 # Prepare the counts
-rlog_dds <- rlog(deseq.output$dds)
+rlog.dds <- rlog(de.results.list[[contrast]]$dds)
 
 # Annotation to view PCA by
 PCA.group <- "kshv_expression_median"
 
 # PCA Plot
-PCA.plot <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 700)
+PCA.plot <- plotPCA(rlog.dds, intgroup = PCA.group, ntop = 700)
 
 # Plotly PCA for interactivity
-PCA.plot.data <- plotPCA(rlog_dds, intgroup = PCA.group, ntop = 700, returnData = TRUE)
+PCA.plot.data <- plotPCA(rlog.dds, intgroup = PCA.group, ntop = 700, returnData = TRUE)
 
 PCA.plotly <- plot_ly(data = PCA.plot.data, x = ~PC1, y = ~PC2, text = ~name, mode = "markers", color = ~factor(group)) %>%
   layout(title = "PCA Plot",
@@ -391,83 +529,65 @@ print(PCA.plotly)
 
 # Export the PCA plot
 
-export.PCA <- FALSE
 if(export.PCA == TRUE){
   ggsave(paste0("Results/QC/PCA.pdf"), plot = PCA.plot)
 }
 
 ```
-# Get the read count information for CXCL8
 
-```{r}
+# Clustering of QC flagged samples
 
-# Grab the normalized counts
-CXCL8_counts <- normalized_counts["CXCL8", ]
+```{r QC Flag PCA}
 
-# Make the rows as SampleIDs
-CXCL8_df <- as.data.frame(t(CXCL8_counts))
-CXCL8_df$SampleID <- rownames(CXCL8_df)
+qc.flagged.samples <- c("SB 22 2794", 
+                        "SB 22 2963", 
+                        "SB 22 696")
 
-# Set up the annotations
-CXCL8_anno_columns <- c("SampleID","KS_alone","CD4_count","response")
-subset_anno_df <- annotation_df[CXCL8_anno_columns]
+# Add a column for qc flagged samples
+PCA.data.qc.flag <- PCA.plot.data %>% 
+  mutate(qc_flag = ifelse(name %in% qc.flagged.samples, 
+                          "Y", 
+                          "N"))
 
-# Correct SampleID names in annotation df
-subset_anno_df <- subset_anno_df %>% mutate(SampleID = str_replace_all(SampleID, "-", " "))
+# Genarate a plot with qc flagged samples labeled
+PCA.plot <- ggplot(PCA.data.qc.flag, aes(x = PC1, 
+                                         y = PC2, 
+                                         color = qc_flag)) + 
+  geom_point()
+                     
 
-# Create a master df
-CXCL8_df <- merge(CXCL8_df, subset_anno_df, by = "SampleID")
-
-CXCL8_mean_KS_Y <- mean(CXCL8_df$CXCL8[CXCL8_df$KS_alone == "Y"], na.rm = TRUE)
-CXCL8_mean_KS_N <- mean(CXCL8_df$CXCL8[CXCL8_df$KS_alone == "N"], na.rm = TRUE)
-
-CXCL8_df$KS_alone_mean <- ifelse(CXCL8_df$KS_alone == "Y", CXCL8_mean_KS_Y, CXCL8_mean_KS_N)
-
-CXCL8_mean_CD4_High <- mean(CXCL8_df$CXCL8[CXCL8_df$CD4_count == "High"], na.rm = TRUE)
-CXCL8_mean_CD4_Low <- mean(CXCL8_df$CXCL8[CXCL8_df$CD4_count == "Low"], na.rm = TRUE)
-
-CXCL8_df$CD4_count_mean <- ifelse(CXCL8_df$CD4_count == "High", CXCL8_mean_CD4_High, CXCL8_mean_CD4_Low)
-
-CXCL8_mean_response_Y <- mean(CXCL8_df$CXCL8[CXCL8_df$response == "Y"], na.rm = TRUE)
-CXCL8_mean_response_N <- mean(CXCL8_df$CXCL8[CXCL8_df$response == "N"], na.rm = TRUE)
-
-CXCL8_df$response_mean <- ifelse(CXCL8_df$response == "Y", CXCL8_mean_response_Y, CXCL8_mean_response_N)
-
-
-
-#CXCL8_deg <- ruv_deg_list_export[ruv_deg_list_export$gene == "CXCL8", ]
-
-export_CXCL8_summary <- FALSE
-if(export_CXCL8_summary == TRUE){
-  write.csv(CXCL8_df, file = "Results/CXCL8_summary.csv", row.names = FALSE)
-}
-
+# Plotly plot for identifying specific samples
+PCA.qc.flag.plotly <- plot_ly(data = PCA.data.qc.flag, x = ~PC1, y = ~PC2, text = ~name, mode = "markers", color = ~factor(qc_flag)) %>%
+  layout(title = "PCA Plot",
+         xaxis = list(title = "PC1"),
+         yaxis = list(title = "PC2"))
 
 ```
+
 
 # Heatmap of Variable Genes
 
 ```{r}
 
 # Prepare the normalized counts
-log.norm.counts <- log2(counts(dds, normalized = TRUE) + 1)
+log.norm.counts <- log2(counts(de.results.list[[contrast]]$dds, normalized = TRUE) + 1)
 
 # Prepare the annotation columns
-anno.columns <- c("KS_alone", "CD4_group")
-annotation_df <- as.data.frame(annotation_df)
+anno.columns <- c("KS_alone", "CD4_count_175")
+annotation.df <- as.data.frame(annotation.df)
 
 # Ensure the row names are the sample names
-rownames(annotation_df) <- annotation_df$SampleID
-heatmap.annotation <- annotation_df[ ,anno.columns]
+rownames(annotation.df) <- annotation.df$SampleID
+heatmap.annotation <- annotation.df[ ,anno.columns]
 
 # Order the annotation
 heatmap.annotation <- heatmap.annotation %>% 
-  arrange(CD4_group) %>% arrange(KS_alone)
+  arrange(CD4_count_175) %>% arrange(KS_alone)
 
 # Define the colors for the annotations
 anno.colors = list(
   KS_alone = c(Y = "seagreen", N = "red4"), 
-  CD4_group = c(High = "purple", Low = "coral")
+  CD4_count_175 = c(High = "purple", Low = "coral")
   )
 
 # Determine the most variable genes using the coefficient of variation
@@ -528,133 +648,7 @@ if(export.top50 == TRUE){
          units = "in")
   
 }
-
-# Create a heatmap with all genes
-heatmap.all <- pheatmap(log.norm.counts, 
-         main = "All Genes", 
-         show_rownames = FALSE, 
-         scale = "row", 
-         show_colnames = TRUE,
-         border_color = NA, 
-         cluster_rows = TRUE, 
-         cluster_cols = FALSE, 
-         clustering_method = "average", 
-         clustering_distance_rows = "correlation", 
-         clustering_distance_cols = "correlation", 
-         color = colorRampPalette(c("blue", "white", "red"))(120), 
-         annotation_row = NA, 
-         annotation_col = heatmap.annotation, 
-         annotation_colors = anno.colors
-         )
-
-export.heatmap.all <- FALSE
-if(export.heatmap.all == TRUE){
-  
-  ggsave("Results/heatmap_all.png",
-         plot = heatmap.all, 
-         width = 10, 
-         height = 10, 
-         units = "in")
-  
-}
-
-
-# Create a heatmap for the DEGs from the DEG contrast
-
-# Get a list of the DEGS
-contrast_deg_list <- rownames(contrast_ruv_deg_list[contrast_ruv_deg_list$padj < 0.05, ])
-
-# Loosen the cutoff if no DEGs found
-if(length(rownames(contrast_deg_list)) == 0){ 
-  
-  print("No DEGs found for padj < 0.05, trying padj < 0.1")
-  
-  contrast_deg_list <- rownames(contrast_ruv_deg_list[contrast_ruv_deg_list$padj < 0.1, ])
-}
-
-if(length(rownames(contrast_deg_list)) == 0){ 
-  
-  print("No DEGs found for padj < 0.05, trying pvalue < 0.05")
-  
-  contrast_deg_list <- rownames(contrast_ruv_deg_list[contrast_ruv_deg_list$pvalue < 0.05, ])
-  
-}
-
-# Remove the positive and negative probes
-# Identify the NEG and POS probes
-NEG.indices <- grep("NEG_", contrast_deg_list)
-POS.indices <- grep("POS_", contrast_deg_list)
-control.indices <- c(NEG.indices, POS.indices)
-
-# Remove the control probes
-if(length(control.indices) > 0){
-  goi <- contrast_deg_list[-control.indices]
-} else{
-  goi <- contrast_deg_list
-}
-
-
-# Gather the annotation for the contrast
-anno.columns <- c(contrast)
-annotation_df <- as.data.frame(annotation_df)
-
-# Ensure the row names are the sample names
-rownames(annotation_df) <- annotation_df$SampleID
-heatmap.annotation <- annotation_df[ ,anno.columns, drop = FALSE]
-
-# Order the annotation
-heatmap.annotation <- heatmap.annotation %>% arrange(.data[[contrast]])
-
-# Reorder the data columns to they match the annotation row order
-row.order <- rownames(heatmap.annotation)
-log.norm.counts <- log.norm.counts[, row.order]
-
-# Define the annotation colors for the contrast
-anno.colors1 = list(
-  KS_alone = c(Y = "seagreen", N = "red4")
-  )
-
-anno.colors2 = list(
-  CD4_group = c(High = "purple", Low = "coral")
-  )
-
-heatmap.contrast <- pheatmap(log.norm.counts[goi, ], 
-         main = paste0("DEGs for ", contrast), 
-         show_rownames = TRUE, 
-         scale = "row", 
-         show_colnames = TRUE,
-         border_color = NA, 
-         cluster_rows = TRUE, 
-         cluster_cols = FALSE, 
-         clustering_method = "average", 
-         clustering_distance_rows = "correlation", 
-         clustering_distance_cols = "correlation", 
-         color = colorRampPalette(c("blue", "white", "red"))(120), 
-         annotation_row = NA, 
-         annotation_col = heatmap.annotation, 
-         annotation_colors = anno.colors2
-         )
-
-
-export.heatmap.contrast <- TRUE
-if(export.heatmap.contrast == TRUE){
-  
-  ggsave(paste0(results.folder, run.folder, "heatmap_", contrast, ".png"),
-         plot = heatmap.contrast, 
-         width = 12, 
-         height = 12, 
-         units = "in")
-  
-}
-
-print(heatmap.top50)
-print(heatmap.all)
-print(heatmap.contrast)
-
-
-
 ```
-
 
 # Clustering of Viral Gene Probes
 
@@ -662,37 +656,32 @@ print(heatmap.contrast)
 
 # See reference vignette: https://bioconductor.org/packages/release/bioc/vignettes/PCAtools/inst/doc/PCAtools.html#introduction
 
-library(stringr)
-library(dplyr)
-library(ggfortify)
-library(PCAtools)
-
 # Transform DESEQ normalized counts to variance stabilized
-vst.dds <- varianceStabilizingTransformation(deseq.output$dds)
+vst.dds <- varianceStabilizingTransformation(de.results.list[[contrast]]$dds)
 
 # Gather normalized counts as a df
-normalized.counts <- as.data.frame(assay(vst.dds))
+normalized.vst.counts <- as.data.frame(assay(vst.dds))
 
 # Identify the KSHV genes
-kshv.genes <- str_detect(rownames(normalized.counts), "^KSHV")
+kshv.genes <- str_detect(rownames(normalized.vst.counts), "^KSHV")
 
 # Subset for KSHV genes
-normalized.counts.kshv <- normalized.counts[kshv.genes, ]
-normalized.counts.notkshv <- normalized.counts[-kshv.genes, ]
+normalized.vst.counts.kshv <- normalized.vst.counts[kshv.genes, ]
+normalized.vst.counts.notkshv <- normalized.vst.counts[-kshv.genes, ]
 
 # Transpose gene counts
-normalized.counts.kshv.transpose <- as.data.frame(t(normalized.counts.kshv))
+normalized.vst.counts.kshv.transpose <- as.data.frame(t(normalized.vst.counts.kshv))
 
 export.kshv.gene.counts <- FALSE
 if(export.kshv.gene.counts == TRUE){
   
   write.csv(normalized.counts.kshv, file = "Results/kshv_counts_samples_as_columns.csv")
   write.csv(normalized.counts.kshv.transpose, file = "Results/kshv_counts_samples_as_rows.csv")
-  
+
   
 # Gather the average expression per sample
-kshv.means <- colMeans(normalized.counts.kshv)
-notkshv.means <- colMeans(normalized.counts.notkshv)
+kshv.means <- colMeans(normalized.vst.counts.kshv)
+notkshv.means <- colMeans(normalized.vst.counts.notkshv)
 
 total.median.kshv <- median(kshv.means)
 total.mean.kshv <- mean(kshv.means)
@@ -716,39 +705,23 @@ label.data <- data.frame(
 kshv.distribution.plot <- ggplot(data.frame(kshv.means), aes(x = kshv.means)) +
   geom_histogram(aes(y = ..density..), bins = 14, fill = "lightblue", color = "black", alpha = 0.5) + 
   geom_density(alpha=0.6) +
-  geom_vline(xintercept = total.median.kshv, color = "coral", linetype = "dashed", size = 1) + 
-  geom_vline(xintercept = total.mean.kshv, color = "maroon", linetype = "dashed", size = 1) +
-  geom_vline(xintercept = total.median.notkshv, color = "lightgreen", linetype = "dashed", size = 1) +
-  geom_vline(xintercept = total.mean.notkshv, color = "darkgreen", linetype = "dashed", size = 1) + 
+  geom_vline(xintercept = total.median.kshv, color = "coral", linetype = "dashed", linewidth = 1) + 
+  geom_vline(xintercept = total.mean.kshv, color = "maroon", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = total.median.notkshv, color = "lightgreen", linetype = "dashed", linewidth = 1) +
+  geom_vline(xintercept = total.mean.notkshv, color = "darkgreen", linetype = "dashed", linewidth = 1) + 
   labs(title = "Distribution of Average KSHV Gene Counts per Sample",
        x = "Average Gene Count",
        y = "Frequency") + 
   geom_text_repel(data = label.data, aes(x = x, y = y, label = label), color = "black", vjust = -0.5) +
   theme_minimal()
-  
-  
+
 }
 ```
 
 ```{r}
-# Run PCA
-kshv.pca <- pca(normalized.counts.kshv, 
-                metadata = merged_pData, 
-                removeVar = 0.1)
-
-# Plot PCA
-
-kshv.pca.plot.by.sample <- biplot(kshv.pca, 
-       colby = contrast, 
-       legendPosition = 'top', 
-       legendLabSize = 16, 
-       legendIconSize = 8.0)
-
-screeplot <- screeplot(kshv.pca)
-
 # Visualize clustering of genes
 
-kshv_annotation <- as.data.frame(read_excel("annotations/kshv_genes_annotation.xlsx"))
+kshv.annotation <- as.data.frame(read_excel("annotations/kshv_genes_annotation.xlsx"))
 
 rownames(kshv_annotation) <- kshv_annotation$gene
 
@@ -790,7 +763,12 @@ if(export.PCA == TRUE){
 
 ```{r Divide samples by KSHV average expression}
 
-# Determine the averge per sample
+# Determine the average per sample
+#normalized.counts.kshv <- normalized.counts.kshv %>% 
+#  select(-gene)
+
+normalized.counts.kshv <- normalized.counts.kshv %>% 
+  select(-gene)
 average.kshv.counts <- colMeans(normalized.counts.kshv)
 
 # Set up a data frame for determining groups
@@ -823,105 +801,6 @@ if(export.annotation == TRUE){
   
 }
 
-
-```
-
-# Boxplots of Viral Gene Probes
-
-```{r}
-
-library(tidyr)
-
-# Boxplot of Lytic versus Latent for individual samples
-
-# Set up a column for the viral gene in the counts df
-normalized.counts.kshv$gene <- rownames((normalized.counts.kshv))
-
-# Merge into a master DF
-kshv.df <- merge(normalized.counts.kshv, kshv_annotation, by = "gene")
-
-
-# Melt the df to a long version
-kshv.df.long <- kshv.df %>%
-    pivot_longer(cols = starts_with("SB"), names_to = "sample", values_to = "count")
-
-# Gather the sample names
-sample.names <- colnames(kshv.df)[grep("SB", colnames(kshv.df))]
-
-for(ID in sample.names){
-  
-  # Filter for a specific sample
-  kshv.df.sample <- kshv.df.long %>% filter(sample == ID)
-  
-  # Make a boxplot of lytic versus latent
-  kshv.boxplot.type <- ggplot(kshv.df.sample, aes(x = type, y = count)) +
-    geom_boxplot() +
-    labs(title = paste0("Lytic vs Latent KSHV genes for ", ID),
-         x = NULL,
-         y = "Count")
-  
-  kshv.boxplot.all <- ggplot(kshv.df.sample, aes(x = sample, y = count)) +
-    geom_boxplot() +
-    labs(title = paste0("All KSHV gene counts for ", ID),
-         x = NULL,
-         y = "Count")
-  
-  # Combine into a single image
-  ID.combined.boxplot <- grid.arrange(kshv.boxplot.all, kshv.boxplot.type, ncol = 2)
-  
-  # Save the plot
-  ggsave(paste0(results.folder, "kshv_genes/", run.folder, ID, "_kshv_genes_boxplot.png"), 
-        plot = ID.combined.boxplot, 
-        width = 8, 
-        height = 8, 
-        units = "in")
-}
-
-kshv.boxplot.all.samples <- ggplot(kshv.df.long, aes(x = sample, y = count)) +
-  geom_boxplot() +
-  labs(title = "Lytic vs Latent Gene Counts by Sample",
-         x = "Gene Type",
-         y = "Count") + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-ggsave(paste0(results.folder, "kshv_genes/", run.folder, "kshv_all_boxplot.png"), 
-        plot = kshv.boxplot.all.samples, 
-        width = 14, 
-        height = 8, 
-        units = "in")
-
-# Combine sample and type
-kshv.df.long$sample_type <- paste0(kshv.df.long$sample, "_", kshv.df.long$type)
-
-kshv.boxplot.sample.types <- ggplot(kshv.df.long, aes(x = sample, y = count, color = type)) +
-  geom_boxplot() +
-  labs(title = "Lytic vs Latent Gene Counts by Sample",
-         x = "Gene Type",
-         y = "Count") + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5))
-
-
-ggsave(paste0(results.folder, "kshv_genes/", run.folder, "kshv_type_boxplot.png"), 
-        plot = kshv.boxplot.sample.types, 
-        width = 14, 
-        height = 8, 
-        units = "in")
-
-kshv.genes.boxplot <- ggplot(kshv.df.long, aes(x = gene, y = count, color = type)) +
-  geom_boxplot() +
-  labs(title = "KSHV Gene Counts for all Samples",
-         x = "KSHV Gene",
-         y = "Count") + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5))
-
-
-ggsave(paste0(results.folder, "kshv_genes/", run.folder, "kshv_genes_boxplot.png"), 
-        plot = kshv.genes.boxplot, 
-        width = 14, 
-        height = 8, 
-        units = "in")
-
-write.csv(kshv.df.long, file = paste0(results.folder, "kshv_genes/", run.folder, "kshv_gene_df.csv"), row.names = FALSE)
 
 ```
 
@@ -983,7 +862,7 @@ dsp.samples.df$pData <- dsp.samples.df$pData %>%
   filter(SampleID %in% dsp.samples)
 
 # Subset the counts
-dsp.samples.df$raw.counts <- raw.count.df %>% 
+dsp.samples.df$raw.counts <- rcc.dfs$raw.counts %>% 
   dplyr::select(all_of(dsp.samples))
 
   
@@ -995,11 +874,10 @@ deseq.output <- run_RUV_DESEQ2(contrast = "CD4_count_200",
                                feature.data = dsp.samples.df$fData, 
                                k = 1, 
                                additional.covar = NULL, 
-                               hk.genes = dsp.samples.df$hk.gene.list, 
-                               exclude.hk.genes = NULL)
+                               hk.genes = hk.final.list)
   
   
-  ## Make a volcano plot for the DEGs
+## Make a volcano plot for the DEGs
   
 # Identify the NEG and POS probes
 NEG.indices <- grep("NEG_", rownames(deseq.output$all.de.results))
@@ -1044,7 +922,7 @@ volcano.plot <- ggplot(data = deg.results.df, aes(x = log2FoldChange,
   theme(plot.title = element_text(hjust = 0.5))
   
   # Export the volcano plot
-  export.volcano <- TRUE
+  export.volcano <- FALSE
   if(export.volcano == TRUE){
       ggsave(paste0(results.folder, run.folder, "overlap_ncounter_volcano_plot.png"),
            plot = volcano.plot, 
@@ -1092,22 +970,26 @@ volcano.plot <- ggplot(data = deg.results.df, aes(x = log2FoldChange,
 
 # Load the reference file
 # LM22 reference: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5895181/
-lm22.file.path <- "/rstudio-files/ccr-dceg-data/users/ned/CPTR/CPTR-6 Annunziata/cell_decon_reference/LM22.txt"
+lm22.file.path <- "/Users/cauleyes/Cibersortx/LM22.txt"
 lm22.reference <- read.csv(lm22.file.path, sep = "\t")
 
 # Compare probe set to CIBERSORT reference
 lm22.reference.genes <- lm22.reference$Gene.symbol
 
-save(lm22.reference.genes, file = "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/cibersort/reference_genes.rda")
-
-
 # Load the normalized counts
-norm.counts <- read.csv("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/Results/5_20_2024/RUV_normalized_counts.csv")
+norm.counts <- read.csv(paste0(results.folder, run.folder, "RUV_normalized_counts.csv"))
 
 # Determine genes missing from the reference in the ncounter set
 ncounter.gene.list <- norm.counts$gene
 
-save(lm22.reference.genes, ncounter.gene.list, file = "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/cibersort/cibersort_gene_lists.rda")
+save.ref.genes <- FALSE
+if(save.ref.genes == TRUE){
+  save(lm22.reference.genes, 
+       ncounter.gene.list, 
+       file = paste0(results.folder, 
+                     run.folder,
+                     "cibersort_gene_lists.rda"))
+}
   
 missing.from.ref <- setdiff(ncounter.gene.list, lm22.reference.genes)
 
@@ -1127,8 +1009,17 @@ norm.counts.mapped <- norm.counts %>%
   mutate(gene = ifelse(gene %in% mapping.list, names(mapping.list)[match(gene, mapping.list)], gene))
 
 # Write out inout file for cibersort
-write.table(norm.counts.mapped,
-          paste0("/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/cibersort/CCBR1245_ciber_sort_input.tsv"), sep = "\t")
+export.cibersort <- FALSE
+if(export.cibersort == TRUE){
+  
+  write.table(norm.counts.mapped,
+          paste0(results.folder, 
+                 run.folder, 
+                 "CCBR1245_ciber_sort_input.tsv"), 
+          sep = "\t")
+  
+}
+
 
 
 

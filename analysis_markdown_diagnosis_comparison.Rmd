@@ -1,0 +1,444 @@
+---
+title: "nCounter_RNA_Analysis"
+author: "Ned Cauley"
+date: "8/5/24"
+output: html_document
+---
+
+# This markdown and analysis based on https://github.com/bhattacharya-a-bt/CBCS_normalization/blob/master/sabry_analysis.R
+# The above analysis is from the publication https://academic.oup.com/bib/article/22/3/bbaa163/5891144?login=true
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set up libraries and QC functions libraries
+
+```{r Libraries and RUVseq functions, message=FALSE, warning=FALSE}
+#library(NanoStringQCPro)
+#library(NanoStringNorm)
+
+library(ggplot2)
+library(EnvStats)
+library(MASS)
+library(RUVSeq)
+library(DESeq2)
+library(limma)
+library(matrixStats)
+library(readxl)
+library(plotly)
+library(pheatmap)
+library(ggrepel)
+library(gridExtra)
+library(grid)
+library(dplyr)
+library(tibble)
+library(tidyr)
+library(stringr)
+library(ggfortify)
+library(PCAtools)
+library(ggpubr)
+
+source("R/ncounter_analysis_functions.R")
+
+# Load the annotation file
+annotation_file_path <- "5_20_24_ncounter_rna_annotation_edit_NC.csv"
+annotation.df <- read.csv(annotation_file_path)
+
+
+# Create a new folder for the run date and results
+run.folder <- "11_13_2024/diagnosis_comparison/"
+
+results.folder <- "results/"
+
+```
+
+```{r Define the contrast for the DEG analysis, message=FALSE, warning=FALSE}
+
+# Define the contrast and levels from the annotation columns for QC and DEG analysis
+# Levels are: Effect, Reference. 
+# This means a positive log2foldchange = lower reference, higher effect
+comparison.list <- list(
+  "Diagnosis_MCD" = c("KS_MCD", "KS"), 
+  "Diagnosis_PEL" = c("KS_PEL", "KS"), 
+  "Diagnosis_KICS" = c("KS_KICS", "KS"), 
+  "Diagnosis_MCD_PEL" = c("KS_MCD_PEL", "KS"))
+
+```
+
+
+## Load the processed read counts
+
+```{r Initial Dataframes and QC,  message=FALSE, warning=FALSE}
+
+load(file = "ncounter_processed_rcc_counts.rda")
+
+```
+
+## Run RUVseq differential expression analysis
+
+```{r, message=FALSE, warning=FALSE}
+
+# Toggles for analysis and plots
+run.de <- TRUE
+export.de.results <- FALSE
+export.norm.counts <- FALSE
+create.volcano <- TRUE
+export.volcano <- FALSE
+create.heatmap <- TRUE
+export.heatmap <- FALSE
+export.PCA <- TRUE
+
+
+# Start a vector of HK genes to use
+hk.final.list <- c("UBB", 
+                   "TLK2", 
+                   "DNAJC14", 
+                   "POLR2A", 
+                   "SDHA", 
+                   "STK11IP", 
+                   "OAZ1", 
+                   "TBC1D10B", 
+                   "GUSB", 
+                   "PSMC4", 
+                   "TFRC", 
+                   "ABCF1", 
+                   "G6PD")
+
+# Retrieve KSHV genes
+kshv.genes <- rownames(rcc.dfs$raw.counts[grep("KSHV", rownames(rcc.dfs$raw.counts)), ])
+kshv.genes <- c(kshv.genes, "ORF75")
+
+# Toggle to rerun analysis
+de.results.list <- list()
+
+# Run each DE contrast
+if(run.de == TRUE){
+  
+  for(comparison in names(comparison.list)){
+    
+    contrast.levels <- comparison.list[[comparison]]
+    
+    # Run DESEQ with RUVseq normalization for k sources of variability
+    deseq.output <- run_RUV_DESEQ2(contrast = "Diagnosis", 
+                   contrast.levels = contrast.levels, 
+                   annotation.data = annotation.df, 
+                   raw.counts = rcc.dfs$raw.counts, 
+                   feature.data = rcc.dfs$fData, 
+                   k = 1, 
+                   additional.covar = NULL, 
+                   hk.genes = hk.final.list)
+    
+    de.results.list[[comparison]] <- deseq.output
+    
+    
+    # Export all DE results
+    if(export.de.results == TRUE){
+      write.csv(deseq.output$all.de.results, file = paste0(results.folder, run.folder,   "DE_results_",comparison,".csv"), row.names =   FALSE)
+    }
+    
+    # Gather normalized counts
+    normalized.counts <- as.data.frame(counts(de.results.list[[comparison]]$dds, normalized = TRUE))
+    # Add a gene column
+    gene <- rownames(normalized.counts)
+    normalized.counts <- cbind(gene, normalized.counts) 
+  
+  }
+  
+  # Export Normalized read counts
+  if(export.norm.counts == TRUE){
+
+    write.csv(normalized.counts, file = paste0(results.folder, 
+    run.folder,   
+    "RUV_normalized_counts.csv"), 
+    row.names = FALSE)
+    
+  }
+
+}
+```
+
+### Plots
+
+#### Volcano Plot
+
+```{r}
+# Create plots per contrast
+
+# Label cytokine genes
+cytokine.genes <- normalized.counts[grep("^IL", normalized.counts$gene), ]$gene
+
+cytokine.genes <- c(cytokine.genes, "TNF", "IFNA1", "IFNG", "IRF4")
+
+# Volcano plot
+if(create.volcano == TRUE){
+  
+  volcano.list <- list()
+  custom.volcano.list <- list()
+  
+  for(comparison in names(de.results.list)){
+    
+    contrast.levels <- comparison.list[[comparison]]
+    
+    # Standard volcano
+    volcano.output <- make_volcano(de.results = de.results.list[[comparison]]$all.de.results,
+                                   title = gsub("_", " ", comparison), 
+                                   legend.title = paste0("Expression in ", contrast.levels[1]), 
+                                   x.axis.title = "log2 Fold Change", 
+                                   fc.limit = 1, 
+                                   custom.gene.labels = NULL, 
+                                   remove.controls = TRUE, 
+                                   remove.genes = kshv.genes)
+    
+    volcano.list[[comparison]] <- volcano.output
+    
+    # Export the volcano plot
+    if(export.volcano == TRUE){
+        ggsave(paste0(results.folder, run.folder, "volcano_", comparison, "_adjpval.png"),
+             plot = volcano.output$volcano.plot, 
+             width = 8, 
+             height = 8, 
+             units = "in")
+    }
+    
+    # Custom volcano with cytokine genes labeled
+    volcano.output <- make_volcano(de.results = de.results.list[[comparison]]$all.de.results,
+                                   title = gsub("_", " ", comparison), 
+                                   legend.title = paste0("Expression in ", contrast.levels[1]), 
+                                   x.axis.title = "log2 Fold Change", 
+                                   fc.limit = 1, 
+                                   custom.gene.labels = cytokine.genes, 
+                                   remove.controls = TRUE, 
+                                   remove.genes = kshv.genes)
+    
+    custom.volcano.list[[comparison]] <- volcano.output
+    
+    # Export the volcano plot
+    if(export.volcano == TRUE){
+        ggsave(paste0(results.folder, run.folder, "cytokines_volcano_", comparison, "_adjpval.png"),
+             plot = volcano.output$volcano.plot, 
+             width = 8, 
+             height = 8, 
+             units = "in")
+    }
+  
+    
+  }
+  
+}
+
+```
+
+#### Heatmap
+
+```{r}
+
+# Heatmap
+if(create.heatmap == TRUE){
+  
+  heatmap.list <- list()
+  
+  for(comparison in names(de.results.list)){
+    
+    contrast.levels <- comparison.list[[comparison]]
+  
+    heatmap.output <- make_heatmap(deseq.output = de.results.list[[comparison]], 
+                                    contrast = "Diagnosis", 
+                                    contrast.levels = contrast.levels, 
+                                    annotation = annotation.df, 
+                                    remove.genes = kshv.genes, 
+                                    cluster.rows = TRUE, 
+                                    show.row.names = TRUE, 
+                                    cluster.cols = TRUE, 
+                                    show.col.names = FALSE)
+    
+    heatmap.list[[comparison]] <- heatmap.output
+    
+    
+    if(export.heatmap == TRUE){
+    
+      ggsave(paste0(results.folder, run.folder, "heatmap_", comparison, ".png"),
+           plot = heatmap.output$heatmap.contrast, 
+           width = 12, 
+           height = 12, 
+           units = "in")
+      }
+    
+    
+    
+  }
+  
+}
+
+
+```
+
+# Load previously generated normalized counts
+
+```{r}
+
+normalized.counts <- read.csv(paste0(results.folder, 
+                                     "11_13_2024/all/", 
+                                     "RUV_normalized_counts.csv"))
+
+# Fix column names to match annotation sheet
+colnames(normalized.counts) <- gsub("\\."," ", colnames(normalized.counts))
+
+# Add row names
+rownames(normalized.counts) <- normalized.counts$gene
+
+```
+
+# Read count information for specific genes
+
+```{r}
+
+#Create a combined violin and boxplot
+
+# Cytokine genes
+cytokine.genes <- normalized.counts[grep("^IL", normalized.counts$gene), ]$gene
+
+cytokine.genes <- c(cytokine.genes, "TNF", "IFNA1", "IFNG", "IRF4")
+
+KS.alone.cytokine.boxplot <- gene_counts_violin_boxplot(counts = normalized.counts,
+                                               annotation.df = annotation.df, 
+                                               gene.list = cytokine.genes,
+                                               annotation.field = "KS_alone", 
+                                               display.summary.stat = FALSE, 
+                                               compare.groups = TRUE)
+
+multi.diagnosis.groups <- c("KS_KICS", 
+                           "KS_MCD", 
+                           "KS_MCD_PEL", 
+                           "KS_PEL")
+
+cytokine.boxplot.list <- list()
+
+for(comparison in multi.diagnosis.groups){
+  
+  compare.groups <- c("KS", comparison)
+  
+  annotation.subset <- annotation.df %>% 
+    filter(Diagnosis %in% compare.groups)
+  
+  group.boxplot <- gene_counts_violin_boxplot(counts = normalized.counts,
+                                               annotation.df = annotation.subset, 
+                                               gene.list = cytokine.genes,
+                                               annotation.field = "Diagnosis", 
+                                               display.summary.stat = FALSE, 
+                                               compare.groups = TRUE)
+  
+  cytokine.boxplot.list[[group]] <- group.boxplot
+  
+  export.cytokine.boxplot <- TRUE
+  if(export.cytokine.boxplot == TRUE){
+    
+    ggsave(paste0(results.folder, run.folder, "cytokine_boxplot_", comparison, ".png"),
+           plot = group.boxplot, 
+           width = 12, 
+           height = 12, 
+           units = "in")
+    
+  }
+  
+}
+
+
+
+
+```
+
+# PCA
+
+```{r}
+
+# Plot PCA
+
+# Run for each diagnosis comparison
+
+PCA.plot.list <- list()
+
+for(comparison in names(comparison.list)){
+  
+  contrast.levels <- comparison.list[[comparison]]
+  
+  # Filter annotation for specific contrast levels
+  subset.annotation.data <- annotation.df %>% 
+    filter(Diagnosis %in% contrast.levels)
+  
+  annotation.samples <- subset.annotation.data$SampleID
+  
+  rownames(subset.annotation.data) <- annotation.samples
+  
+  # Log transform the counts
+  rlog.dds <- rlog(de.results.list[[comparison]]$dds)
+  
+  # PCA Plot
+  PCA.plot <- plotPCA(rlog.dds, intgroup = "Diagnosis", ntop = 700)
+  
+  if(export.PCA == TRUE){
+    
+    ggsave(paste0(results.folder, run.folder, comparison, "_PCA.pdf"), 
+           plot = PCA.plot)
+    
+  }
+  
+  PCA.plot.list[[comparison]] <- PCA.plot
+  
+}
+
+# Run PCA for cytokine genes
+
+# cytokine gene only counts
+cytokine.counts <- normalized.counts %>% 
+  filter(gene %in% cytokine.genes)
+
+cytokine.PCA.plot.list <- list()
+
+for(comparison in names(comparison.list)){
+  
+  contrast.levels <- comparison.list[[comparison]]
+  
+  # Filter annotation for specific contrast levels
+  subset.annotation.data <- annotation.df %>% 
+    filter(Diagnosis %in% contrast.levels)
+  
+  annotation.samples <- subset.annotation.data$SampleID
+  
+  rownames(subset.annotation.data) <- annotation.samples
+  
+  # Filter the raw counts for the same samples
+  subset.cytokine.counts <- cytokine.counts %>% 
+    select(all_of(annotation.samples))
+  
+  # Log transform the counts
+  log2.counts <- subset.cytokine.counts %>% 
+    mutate(across(where(is.numeric), log2))
+  
+  # PCA table
+  PCA.table <- pca(log2.counts, 
+                 metadata = subset.annotation.data, 
+                 removeVar = 0.1)
+  
+  PCA.plot <- biplot(PCA.table, 
+                     colby = "Diagnosis", 
+                     legendPosition = "right", 
+                     legendLabSize = 10, 
+                     legendIconSize = 5, 
+                     lab = NULL,
+                     title = paste0(gsub("_", " ", comparison), " vs. KS"), 
+                     subtitle = "Cytokine Genes Only")
+  
+  if(export.PCA == TRUE){
+    
+    ggsave(paste0(results.folder, run.folder, comparison, "_cytokines_PCA.pdf"), 
+           plot = PCA.plot)
+    
+  }
+  
+  cytokine.PCA.plot.list[[comparison]] <- PCA.plot
+  
+}
+
+
+```

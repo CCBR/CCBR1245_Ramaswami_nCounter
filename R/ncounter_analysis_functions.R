@@ -91,7 +91,7 @@ process_RCC_files <- function(rcc.files.path, annotation.df){
   # Identify missing housekeeping genes in any samples
   merged_pData$HK_Gene_Miss = colSums(raw[hk.gene.list,] == 0)
   
-  # Estbalish all of the rownames of the three dfs
+  # Establish all of the rownames of the three dfs
   rownames(fData) = fData$Gene
   rownames(raw) = fData$Gene
   rownames(merged_pData) <- merged_pData$SampleID
@@ -115,8 +115,19 @@ run_RUV_DESEQ2 <- function(contrast,
                            feature.data, 
                            k = 1, 
                            additional.covar = NULL, 
-                           hk.genes = NULL, 
-                           exclude.hk.genes = NULL){
+                           hk.genes){
+  
+  # Filter annotation for specific contrast levels
+  annotation.data <- annotation.data %>% 
+    filter(.data[[contrast]] %in% contrast.levels)
+  
+  annotation.samples <- annotation.data$SampleID
+  
+  rownames(annotation.data) <- annotation.samples
+  
+  # Filter the raw counts for the same samples
+  raw.counts <- raw.counts %>% 
+    select(all_of(annotation.samples))
   
   # Remove samples with NA from the read counts dataframe
   NA_rows <- which(!complete.cases(annotation.data[[contrast]]))
@@ -136,8 +147,7 @@ run_RUV_DESEQ2 <- function(contrast,
                 annotation.data = annotation.data, 
                 feature.data = feature.data, 
                 k = k, 
-                hk.genes = hk.genes, 
-                exclude.hk.genes = exclude.hk.genes)$set
+                hk.genes = hk.genes)$set
   
   # Remove row of the contrast that contain NA values
   set <- set[complete.cases(pData(set)[[contrast]]), ]
@@ -189,14 +199,13 @@ run_RUVseq <- function(raw.counts,
                        annotation.data, 
                        feature.data, 
                        k, 
-                       hk.genes = NULL, 
-                       exclude.hk.genes = NULL){
+                       hk.genes){
   
   ### INPUT: raw.counts - p x n raw expressions with p genes and n samples
   ###        annotation.data - phenotype metadata across samples
   ###        feature.data - feature metadata across genes
   ###        k - number of dimensions of unwanted variation estimated
-  ###        exclude.hk.genes - vector of gene names to exclude
+  ###        hk.genes - vector of gene names to use as housekeeping
   
 
   
@@ -210,17 +219,6 @@ run_RUVseq <- function(raw.counts,
   set <- newSeqExpressionSet(as.matrix(round(raw.counts)),
                              phenoData=annotation.data,
                              featureData=feature.data)
-  
-  # Label housekeeping if they were not provided
-  if (!is.null(hk.genes)){
-    
-    fData(set)$Class[rownames(set) %in% hk.genes] = 'Housekeeping'
-    
-  }
-  
-  # Define the housekeeping features
-  hk.genes <- rownames(set)[fData(set)$Class == "Housekeeping"]
-  hk.genes = hk.genes[!(hk.genes %in% exclude.hk.genes)]
   
   # Run normalization 
   set <- betweenLaneNormalization(set, which="upper")
@@ -366,5 +364,497 @@ makeRLEplot <- function(data,metadata,id){
           axis.ticks.x=element_blank()) + xlab('Sample') +
     ylab('Median deviation of log expression') + ylim(c(-4,4))
   return(rle_plots)
+  
+}
+
+create_GSEA_preranked <- function(counts, 
+                                  annotation, 
+                                  contrast, 
+                                  contrast.levels){
+  
+  # Gather the signal to noise ratio for GSEA ranking
+  # Default method for ranking genes from GSEA manual:
+  # https://www.gsea-msigdb.org/gsea/doc/GSEAUserGuideTEXT.htm#_Metrics_for_Ranking
+  
+  # Contrast level A is the "condition" (positive when calculating fold change)
+  rownames(annotation) <- annotation$SampleID
+  contrast.A.annotation <- annotation %>% 
+    filter(!!sym(contrast) == contrast.levels[1])
+  
+  contrast.A.sampleIDs <- rownames(contrast.A.annotation)
+  
+  contrast.A.counts <- as.data.frame(counts) %>% 
+    select(all_of(contrast.A.sampleIDs))
+  
+  contrast.A.counts$gene <- rownames(contrast.A.counts)
+  
+  # Contrast level B is the "reference" (negative when calculating fold change)
+  
+  contrast.B.annotation <- annotation %>% 
+    filter(!!sym(contrast) == contrast.levels[2])
+  
+  contrast.B.sampleIDs <- rownames(contrast.B.annotation)
+  
+  contrast.B.counts <- as.data.frame(counts) %>% 
+    select(all_of(contrast.B.sampleIDs))
+  
+  contrast.B.counts$gene <- rownames(contrast.B.counts)
+  
+  # Add a column to each contrast level for the mean and standard deviation
+  contrast.A.counts <- contrast.A.counts %>% 
+    mutate(mean.A = rowMeans(select_if(., is.numeric))) %>%  
+    mutate(stdev.A = apply(select_if(., is.numeric), 1, sd))
+  
+  contrast.B.counts <- contrast.B.counts %>% 
+    mutate(mean.B = rowMeans(select_if(., is.numeric))) %>%  
+    mutate(stdev.B = apply(select_if(., is.numeric), 1, sd))
+  
+  GSEA.preanked.df <- merge(contrast.A.counts, contrast.B.counts, by = "gene")
+  
+  GSEA.preanked.df <- GSEA.preanked.df %>% 
+    mutate(signal2noise = (mean.A - mean.B)/(stdev.A + stdev.B)) %>% 
+    arrange(desc(signal2noise)) %>% 
+    select(c(gene, mean.A, mean.B, stdev.A, stdev.B, signal2noise))
+  
+  return(GSEA.preanked.df)
+  
+}
+
+check_hk_for_de <- function(hk.genes, 
+                            raw.counts, 
+                            annotation, 
+                            contrast.field){
+  
+  # Set up HK genes to check if they are DE
+  hk.raw = raw.counts[hk.genes,]
+  pval = vector(length = nrow(hk.raw))
+  hk.de <- data.frame(gene = hk.genes)
+  
+  # Ensure the sample names are ordered the same for both read counts and annotation
+  annotation <- annotation[match(colnames(hk.raw), annotation$SampleID), ]
+  
+  # Check HK genes for DE for the current contrast
+  for (i in 1:nrow(hk.raw)){
+    reg = glm.nb(as.numeric(hk.raw[i,]) ~ as.factor(annotation[[contrast.field]]))
+    pval[i] = coef(summary(reg))[2,4]
+  }
+  
+  # Create a df for the de results of HK comparisons
+  hk.de <- hk.de %>% 
+    mutate(pval = pval)
+  
+  # Track HK genes that are DEGs
+  hk.degs <- c()
+  for(gene in hk.de$gene){
+    
+    pval.gene <- hk.de$pval[hk.de$gene == gene]
+    
+    if(pval.gene < 0.05){
+      hk.degs <- c(gene, hk.degs)
+    }
+  }
+  
+  # Remove HK that are DE from HK list 
+  if(length(hk.degs > 0)){
+    
+    print(paste0("HK genes that are DE in ", contrast.field, ":", hk.degs))
+    print("Removing HK DEGs from HK list")
+    hk.genes.final <- hk.genes[!hk.genes %in% hk.degs]
+    
+  } else {
+    
+    print(paste0("No HK genes are DE for ", contrast.field))
+    hk.genes.final <- hk.genes
+    
+  }
+  
+  return(list("hk.degs" = hk.degs, 
+              "hk.genes.final" = hk.genes.final))
+  
+}
+
+gene_counts_violin_boxplot <- function(counts, 
+                                annotation.df, 
+                                gene.list, 
+                                annotation.field, 
+                                display.summary.stat = FALSE, 
+                                compare.groups = FALSE){
+  
+  # Set up the annotation df
+  annotation.fields <- c("SampleID", annotation.field)
+  subset.annotation <- as.data.frame(annotation.df)[, annotation.fields, 
+                                                 drop = FALSE]
+  
+  # Check if goi are found in counts
+  for(gene in gene.list){
+    
+    if(!(gene %in% counts$gene)){
+      
+      print(paste0(gene, " not found in counts file"))
+      
+      gene.list <- gene.list[-which(gene.list == gene)]
+      
+    }
+    
+  }
+  
+  # Convert gene counts to log2
+  gene.counts <- counts %>% 
+    filter(gene %in% gene.list) %>% 
+    mutate(across(where(is.numeric), ~.+1)) %>% 
+    mutate(across(where(is.numeric), log2))
+  
+  # Set up counts for merge with annotation
+  gene.counts.transpose <- as.data.frame(t(gene.counts)) %>% 
+    rownames_to_column(var = "SampleID")
+  
+  # Create master annotation/counts df
+  counts.anno.df <- merge(gene.counts.transpose, 
+                          subset.annotation, 
+                          by = "SampleID")
+  
+  # Set up the annotation/counts df for ggplot2
+  counts.anno.df.melt <- counts.anno.df %>% 
+    pivot_longer(cols = all_of(gene.list), 
+                 names_to = "gene", 
+                 values_to = "log_counts")
+  
+  counts.anno.df.melt$log_counts <- as.numeric(counts.anno.df.melt$log_counts)
+  
+  # Create a combined boxplot and violin plot
+  if(display.summary.stat == TRUE){
+    
+    field.violin.plot <- ggplot(counts.anno.df.melt, aes(x = !!sym(annotation.field), 
+                                                         y = log_counts, 
+                                                         fill = !!sym(annotation.field))) +
+      geom_violin() + 
+      geom_boxplot(width = 0.2, fill = "white") + 
+      facet_wrap(~ gene) + 
+      labs(x = paste(gsub("_", " ", annotation.field)), 
+           y = "Log2 Counts", 
+           title = paste0("Log2 Counts for ", gsub("_", " ", annotation.field))) + 
+      stat_summary(
+        fun = mean, 
+        geom = "text", 
+        aes(label = paste("mean:", round(after_stat(y), 2))), 
+        vjust = -0.5, 
+        color = "darkblue"
+      ) + 
+      stat_summary(fun = mean, geom = "crossbar", width = 0.5, color = "darkblue", 
+                   fatten = 0.5) +
+      stat_summary(
+        fun.min = function(x) quantile(x, 0.25),
+        fun = function(x) quantile(x, 0.25), 
+        geom = "text", 
+        aes(label = paste("Q1:", round(after_stat(y), 2))),
+        vjust = 1.5, 
+        color = "black"
+      ) +
+      stat_summary(
+        fun.max = function(x) quantile(x, 0.75),
+        fun = function(x) quantile(x, 0.75), 
+        geom = "text", 
+        aes(label = paste("Q3:", round(after_stat(y), 2))),
+        vjust = -1.5, 
+        color = "black"
+      ) + 
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
+  } else if(compare.groups == TRUE) {
+    
+    field.violin.plot <- ggplot(counts.anno.df.melt, aes(x = !!sym(annotation.field), 
+                                                         y = log_counts, 
+                                                         fill = !!sym(annotation.field))) +
+      geom_violin() + 
+      geom_boxplot(width = 0.2, fill = "white") + 
+      stat_compare_means(method = "wilcox.test", label.y = 0.5) + 
+      facet_wrap(~ gene) + 
+      labs(x = paste(gsub("_", " ", annotation.field)), 
+           y = "Log2 Counts", 
+           title = paste0("Log2 Counts for ", gsub("_", " ", annotation.field))) + 
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+  } else(
+    
+    field.violin.plot <- ggplot(counts.anno.df.melt, aes(x = !!sym(annotation.field), 
+                                                         y = log_counts, 
+                                                         fill = !!sym(annotation.field))) +
+      geom_violin() + 
+      geom_boxplot(width = 0.2, fill = "white") + 
+      facet_wrap(~ gene) + 
+      labs(x = paste(gsub("_", " ", annotation.field)), 
+           y = "Log2 Counts", 
+           title = paste0("Log2 Counts for ", gsub("_", " ", annotation.field))) + 
+      theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    
+  )
+  
+  
+ 
+  
+  return(field.violin.plot)
+    
+}
+
+make_volcano <- function(de.results, 
+                         title, 
+                         legend.title, 
+                         x.axis.title, 
+                         fc.limit = 1, 
+                         custom.gene.labels = NULL, 
+                         remove.controls = TRUE, 
+                         remove.genes){ 
+  
+  # Remove controls if applicable
+  if(remove.controls == TRUE){
+    
+    NEG.indices <- grep("NEG_", rownames(de.results))
+    POS.indices <- grep("POS_", rownames(de.results))
+    control.indices <- c(NEG.indices, POS.indices)
+    
+    # Remove the control probes
+    de.results <- de.results[-control.indices,]
+    
+  } 
+  
+  # Remove custom gene input
+  if(!is.null(remove.genes)){
+    
+    de.results <- de.results[!rownames(de.results) %in% remove.genes, ]
+    
+  }
+  
+
+  
+  # Create a column for direction of DEGs
+  de.results$de_direction <- "NONE"
+  de.results$de_direction[de.results$padj < 0.05 & 
+                             de.results$log2FoldChange > fc.limit] <- "UP"
+  de.results$de_direction[de.results$padj < 0.05 & 
+                             de.results$log2FoldChange < -fc.limit] <- "DOWN"
+  
+  # Create a label for DEGs
+  if(is.null(custom.gene.labels)){
+    
+    de.results$deglabel <- ifelse(de.results$de_direction == "NONE", 
+                                   NA, 
+                                   de.results$gene)
+    
+  } else {
+    
+    de.results$deglabel <- ifelse(de.results$gene %in% custom.gene.labels, 
+                                   de.results$gene, 
+                                   NA)
+    
+  }
+  
+  
+  
+  # Compute the scale for the volcano x-axis
+  log2.scale <- max(abs(de.results$log2FoldChange))
+  
+  # Establish the color scheme for the volcano plot
+  if(is.null(custom.gene.labels)){
+    
+    contrast.level.colors <- c("steelblue4", "grey", "violetred4")
+    names(contrast.level.colors) <- c("DOWN", "NONE", "UP")
+    
+    volcano.plot <- ggplot(data = de.results, aes(x = log2FoldChange, 
+                                                   y = -log10(padj), 
+                                                   col = de_direction, 
+                                                   label = deglabel)) +
+      geom_vline(xintercept = c(-fc.limit, fc.limit), col = "gray", linetype = 'dashed') +
+      geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+      xlim(-7.5, 7.5) + 
+      labs(x = x.axis.title,
+           y = "-log10 adjusted p-value", 
+           title = title) + 
+      geom_point(size = 2) +
+      scale_color_manual(legend.title, 
+                         values = contrast.level.colors) + 
+      geom_text_repel(max.overlaps = Inf) + 
+      xlim(-log2.scale-1, log2.scale+1) + 
+      theme(plot.title = element_text(hjust = 0.5))
+    
+  } else {
+    
+    # Label the custom genes depending on significance
+    de.results <- de.results %>% 
+      mutate(custom.label = ifelse(!is.na(deglabel) & de_direction == "NONE", 
+                                   "BLACK", 
+                                   ifelse(!is.na(deglabel) & de_direction != "NONE", 
+                                          de_direction, 
+                                          "NONE")))
+    
+    contrast.level.colors <- c("steelblue4", "grey", "violetred4", "black")
+    names(contrast.level.colors) <- c("DOWN", "NONE", "UP", "BLACK")
+    
+    de.results.labeled <- de.results %>%
+      filter(custom.label != "NONE")
+    
+    de.results.unlabeled <- de.results %>% 
+      filter(custom.label == "NONE")
+    
+    
+    volcano.plot <- ggplot() + 
+      geom_point(data = de.results.unlabeled, aes(x = log2FoldChange, 
+                                                   y = -log10(padj), 
+                                                   col = custom.label, 
+                                                   alpha = 0.5)) + 
+      geom_point(data = de.results.labeled, aes(x = log2FoldChange, 
+                                                 y = -log10(padj), 
+                                                 col = custom.label, 
+                                                 alpha = 1)) +
+      geom_vline(xintercept = c(-fc.limit, fc.limit), col = "gray", linetype = 'dashed') +
+      geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') + 
+      xlim(-7.5, 7.5) + 
+      labs(x = x.axis.title,
+           y = "-log10 adjusted p-value", 
+           title = title) + 
+      geom_point(size = 2) +
+      scale_color_manual(legend.title, 
+                         values = contrast.level.colors, 
+                         breaks = c("DOWN", "UP")) + 
+      geom_text_repel(data = de.results.labeled,
+                      aes(x = log2FoldChange, 
+                          y = -log10(padj), 
+                          label = deglabel, 
+                          col = custom.label), 
+                      max.overlaps = Inf, 
+                      size = 6, 
+                      show.legend = FALSE) + 
+      xlim(-log2.scale-1, log2.scale+1) + 
+      theme(plot.title = element_text(hjust = 0.5)) + 
+      scale_alpha_identity(guide = "none")
+    
+  }
+  
+  
+  
+  # Make the volcano plot
+  
+  
+  return(list("volcano.plot" = volcano.plot))
+  
+} 
+
+make_heatmap <- function(deseq.output, 
+                         contrast, 
+                         contrast.levels, 
+                         annotation, 
+                         remove.genes, 
+                         cluster.rows, 
+                         show.row.names, 
+                         cluster.cols, 
+                         show.col.names){
+  
+  # Create a heatmap for the DEGs from the DEG contrast
+  
+  # Get a list of the DEGS
+  rownames(deseq.output$deg.list) <- deseq.output$deg.list$gene
+  contrast.deg.list <-   rownames(deseq.output$deg.list[deseq.output$deg.list$padj < 0.05,     ])
+  
+  subtitle <- "padj < 0.05"
+  
+  # Loosen the cutoff if only 1 DEG found (causes an error in pheatmap)
+  if(length(contrast.deg.list) < 2){ 
+    
+    print("No DEGs found for padj < 0.05, trying pvalue < 0.05")
+    
+    contrast.deg.list <-   rownames(deseq.output$deg.list[deseq.output$deg.list$pvalue <   0.05,
+    ])
+    subtitle <- "p-value < 0.05"
+    
+    # Still no DEGs after loosening threshold
+    if(length(contrast.deg.list) < 2){
+      
+      print(paste0("No suitable DEGs to plot on heatmap for ", comparison))
+      stop()
+      
+    }
+    
+  }
+  
+  
+  # Remove the positive and negative probes
+  # Identify the NEG and POS probes
+  NEG.indices <- grep("NEG_", contrast.deg.list)
+  POS.indices <- grep("POS_", contrast.deg.list)
+  control.indices <- c(NEG.indices, POS.indices)
+  
+  # Remove the control probes
+  if(length(control.indices) > 0){
+    goi <- contrast.deg.list[-control.indices]
+  } else{
+    goi <- contrast.deg.list
+  }
+  
+  
+  # Gather the annotation for the contrast
+  anno.columns <- c(contrast)
+  annotation <- as.data.frame(annotation)
+  
+  # Ensure the row names are the sample names
+  rownames(annotation) <- annotation$SampleID
+  contrast.annotation <- annotation[ ,anno.columns, drop = FALSE]
+  
+  # Subset heatmap annotation for any samples taken out in counts
+  # Gather the samples in both
+  anno.samples.rownames <- rownames(contrast.annotation)
+  counts.samples.colnames <- colnames(deseq.output$dds)
+  
+  # Find the samples that are present in both
+  matching.names <- intersect(anno.samples.rownames, counts.samples.colnames)
+  
+  # Subset counts to include only overlapping samples
+  heatmap.annotation <- contrast.annotation[matching.names, , drop = FALSE]
+  
+  # Order by contrast level
+  order.rows <- factor(heatmap.annotation[[contrast]], levels = contrast.levels)
+  heatmap.annotation <- heatmap.annotation[order(order.rows), , drop = FALSE]
+  
+  # Reorder the data columns to they match the annotation row order
+  row.name.order <- rownames(heatmap.annotation)
+  
+  log.norm.counts <- log2(counts(deseq.output$dds, normalized = TRUE) + 1)
+  log.norm.counts <- log.norm.counts[, row.name.order]
+  
+  # Remove custom gene input
+  if(!is.null(remove.genes)){
+    
+    log.norm.counts <- log.norm.counts[!rownames(log.norm.counts) %in% remove.genes, ]
+    
+    goi <- setdiff(goi, remove.genes)
+    
+  }
+  
+  # Define the annotation colors for the contrast
+  anno.colors <- setNames(list(c("cyan", "magenta")), contrast)
+  
+  # Assign the levels to the colors
+  anno.colors[[contrast]] <- setNames(anno.colors[[contrast]], contrast.levels)
+  
+  
+  heatmap.contrast <- pheatmap(log.norm.counts[goi, ], 
+                               main = paste0(contrast, " DEGs (", subtitle, ")"), 
+                               show_rownames = show.row.names, 
+                               scale = "row", 
+                               show_colnames = show.col.names,
+                               border_color = NA, 
+                               cluster_rows = cluster.rows, 
+                               cluster_cols = cluster.cols, 
+                               clustering_method = "average", 
+                               clustering_distance_rows = "correlation", 
+                               clustering_distance_cols = "correlation", 
+                               color = colorRampPalette(c("blue", "white", "red"))(120),   
+                               annotation_row = NA, 
+                               annotation_col = heatmap.annotation, 
+                               annotation_colors = anno.colors
+  )
+  
+  
+  return(list("heatmap.contrast" = heatmap.contrast))
+  
+
+  
   
 }
