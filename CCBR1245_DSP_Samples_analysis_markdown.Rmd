@@ -1,0 +1,2823 @@
+---
+title: "CCBR1245 Ramaswami: Analysis of nCounter and DSP Overlapping Samples"
+output: html_document
+date: "2025-July-15"
+---
+# Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      warning = FALSE, 
+                      message = FALSE)
+
+knitr::opts_knit$set(root.dir = "/Users/cauleyes/CPTR/CPTR-5_Krug_Ramaswami/CPTR_5_DSP_Krug/")
+
+# Increase the time out for downloading the DSP package
+options(timeout = max(300, getOption("timeout")))
+
+# Global parameters
+
+# Knitting Markdown
+include.qc <- FALSE
+include.DE <- FALSE
+include.PCA <- FALSE
+
+# Exporting Results
+global.export.deg <- FALSE
+global.export.volcano <- FALSE
+global.export.heatmap <- FALSE
+global.export.de <- FALSE
+global.export.PCA <- FALSE
+```
+
+```{r, include=FALSE}
+
+library(GeomxTools)
+library(dplyr)
+library(limma)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+library(stringr)
+library(PCAtools)
+library(readxl)
+library(gridExtra)
+library(grid)
+library(knitr)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(SpatialDecon)
+library(reshape2)
+library(ggpubr)
+
+# Source the helper functions
+source("/Users/cauleyes/CPTR/DSP_Analysis/DSP_functions.R")
+
+# Results folder where the results should be exported
+data.folder <- "/Users/cauleyes/CPTR/CPTR-5_Krug_Ramaswami/CPTR_5_DSP_Krug/"
+results.folder <- "/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/Results/November2024/"
+run.folder <- "DSP/11_15_24/"
+
+```
+
+```{r Load DSPWorkflow, include=include.qc}
+
+# Install DSPWorkflow package
+
+install.DSP <- FALSE
+if(install.DSP == TRUE){
+  library(devtools)
+  install_github("NIDAP-Community/DSPWorkflow", ref = "dev")
+}
+
+library(DSPWorkflow)
+
+```
+
+``` {r Load Data, include=include.qc}
+# Load all inputs
+
+dcc.files <- list.files(file.path("dcc"),
+  pattern = ".dcc$",
+  full.names = TRUE,
+  recursive = TRUE
+)
+
+pkc.files <- "Hs_R_NGS_WTA_v1.0.pkc"
+pheno.data.file <- "annotation_Krug_CPTR_5_August2024_NC_edit.xlsx"
+
+```
+
+# Study Design
+
+```{r Study Design, include=include.qc}
+
+# Save the output from the study design function into a list
+sdesign.list <- studyDesign(dcc.files = dcc.files, 
+                                pkc.files = pkc.files,
+                                pheno.data.file = pheno.data.file,
+                                pheno.data.sheet = "annotation",
+                                pheno.data.dcc.col.name = "Sample_ID",
+                                protocol.data.col.names = c("roi"),
+                                experiment.data.col.names = c("panel"),
+                                slide.name.col = "slide name", 
+                                class.col = "class",
+                                region.col = "Region", 
+                                segment.col = "segment",
+                                area.col = "area",
+                                nuclei.col = "nuclei", 
+                                sankey.exclude.slide = FALSE, 
+                                segment.id.length = 10)
+
+# The output of the study design function is a Geomxset Object and a Plot
+# Print out a summary of the object
+
+print(sdesign.list$object)
+
+# Print out the Sankey Plot
+
+print(sdesign.list$sankey.plot)
+```
+
+# QC
+
+```{r QC Preprocessing, include=include.qc}
+
+qc.output <-  qcProc(object = sdesign.list$object,
+                        min.segment.reads = 1000, 
+                        percent.trimmed = 80,    
+                        percent.stitched = 80,   
+                        percent.aligned = 80,    
+                        percent.saturation = 50, 
+                        min.negative.count = 3,   
+                        max.ntc.count = 1000,     
+                        min.nuclei = 200,         
+                        min.area = 1000,
+                        print.plots = TRUE)
+    print(qc.output$segments.qc)
+    print(qc.output$segment.flags)
+    print(qc.output$probe.flags)
+    
+    
+  # Export the flags table
+    
+  export.flags <- FALSE
+  
+  if(export.flags == TRUE){
+    
+    write.csv(qc.output$segment.flags, file =  "qc/segment_qc_flags.csv")
+    
+    write.csv(qc.output$probe.flags, file =  "qc/probe_qc_flags.csv")
+    
+  }
+    
+```
+# Filtering
+
+```{r Segment Filtering by Gene Detection, include=include.qc}
+
+object <- qc.output$object
+
+# Set up lists of segment IDs
+segment.list.total <- pData(object)$segmentID
+
+# Define Modules
+modules <- gsub(".pkc", "", pkc.files)
+
+# Calculate limit of quantification (LOQ) in each segment
+# LOQ = geomean(NegProbes) * geoSD(NegProbes)^(LOQ cutoff)
+# LOQ is calculated for each module (pkc file)
+loq <- data.frame(row.names = colnames(object))
+
+loq.min <- 2
+loq.cutoff <- 2
+
+for(module in modules) {
+  vars <- paste0(c("NegGeoMean_", "NegGeoSD_"),
+                 module)
+  if(all(vars[1:2] %in% colnames(pData(object)))) {
+    
+    neg.geo.mean <- vars[1]
+    neg.geo.sd <- vars[2]
+    
+    loq[, module] <-
+      pmax(loq.min,
+           pData(object)[, neg.geo.mean] * 
+             pData(object)[, neg.geo.sd] ^ loq.cutoff)
+  }
+}
+
+# Store the loq df in the annotation df
+pData(object)$loq <- loq
+
+# Setup a master loq matrix
+loq.mat <- c()
+
+
+for(module in modules) {
+  # Gather rows with the given module
+  ind <- fData(object)$Module == module
+  
+  # Check if each feature has counts above the LOQ
+  mat.i <- t(esApply(object[ind, ], MARGIN = 1,
+                     FUN = function(x) {
+                       x > loq[, module]
+                     }))
+  
+  # Store results in the master loq matrix
+  loq.mat <- rbind(loq.mat, mat.i)
+}
+
+# ensure ordering since this is stored outside of the geomxSet
+loq.mat <- loq.mat[fData(object)$TargetName, ]
+
+# Evaluate and Filter Segment Gene Detection Rate
+# Save detection rate information to pheno data
+pData(object)$GenesDetected <- colSums(loq.mat, na.rm = TRUE)
+pData(object)$GeneDetectionRate <- 100*(pData(object)$GenesDetected / nrow(object))
+
+# Establish detection bins
+detection.bins <- c("less_than_1", "1_5", "5_10", "10_15", "greater_than_15")
+
+# Determine detection thresholds: 1%, 5%, 10%, 15%, >15%
+pData(object)$DetectionThreshold <- 
+  cut(pData(object)$GeneDetectionRate,
+      breaks = c(0, 1, 5, 10, 15, 100),
+      labels = detection.bins)
+
+# stacked bar plot of different cut points (1%, 5%, 10%, 15%)
+segment.stacked.bar.plot<- ggplot(pData(object),
+                          aes(x = DetectionThreshold)) +
+  geom_bar(aes(fill = region)) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+  theme_bw() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(x = "Gene Detection Rate",
+         y = "Segments, #",
+         fill = "Segment Type")
+  
+# cut percent genes detected at 1, 5, 10, 15
+segment.table <- kable(table(pData(object)$DetectionThreshold, 
+                             pData(object)$class))
+
+# Make a list of segments with low detection
+low.detection.segments <- pData(object) %>% 
+  filter(GeneDetectionRate < 5) %>% 
+  select(any_of(c("segmentID", "GeneDetectionRate")))
+
+print(low.detection.segments)
+
+# Export a summary of the segment gene detection
+segment.detection.summary <- pData(object) %>% 
+  select(any_of(c("segmentID", "GeneDetectionRate", "DetectionThreshold")))
+
+export.segment.detection.summary <- FALSE
+
+if(export.segment.detection.summary == TRUE){
+  
+  write.csv(segment.detection.summary, "qc/segment_detection_summary.csv")
+  
+}
+
+```
+
+```{r Remove Segments, include=include.qc}
+
+# Filter the data using the cutoff for gene detection rate
+segment.gene.rate.cutoff <- 1
+
+object.segment.filtered <-
+    object[, pData(object)$GeneDetectionRate >= segment.gene.rate.cutoff]
+
+
+```
+
+# Gene Filtering
+
+```{r Gene Filtering by Detection per Segment, include=include.qc}
+library(scales)
+
+# Evaluate and Filter Study-wide Gene Detection Rate 
+# Calculate detection rate:
+loq.mat <- loq.mat[, colnames(object.segment.filtered)]
+
+fData(object.segment.filtered)$DetectedSegments <- rowSums(loq.mat, na.rm = TRUE)
+fData(object.segment.filtered)$DetectionRate <-
+  100*(fData(object.segment.filtered)$DetectedSegments / nrow(pData(object)))
+
+# Establish detection bins
+detection.bins <- c("0", "less_than_1", "1_5", "5_10", "10_20", "20_30", "30_40", "40_50", "greater_than_50")
+
+# Determine detection thresholds: 1%, 5%, 10%, 15%, >15%
+fData(object.segment.filtered)$DetectionThreshold <- 
+  cut(fData(object.segment.filtered)$DetectionRate,
+      breaks = c(-1, 0, 1, 5, 10, 20, 30, 40, 50, 100),
+      labels = detection.bins)
+
+
+gene.stacked.bar.plot <- ggplot(fData(object.segment.filtered),
+                          aes(x = DetectionThreshold)) +
+  geom_bar(aes(fill = Module)) +
+  geom_text(stat = "count", aes(label = ..count..), vjust = -0.5) +
+  theme_bw() +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+  labs(x = "Gene Detection Rate",
+         y = "Genes, #",
+         fill = "Probe Set")
+
+
+# Gene of interest detection table
+goi <- c("A2M", "CD44")
+
+goi.table <- data.frame(Gene = goi,
+                        Number = fData(object.segment.filtered)[goi, "DetectedSegments"],
+                        DetectionRate = percent(fData(object.segment.filtered)[goi, "DetectionRate"]))
+print(goi.table)
+
+# Plot detection rate:
+plot.detect <- data.frame(Freq = c(1, 5, 10, 20, 30, 50))
+plot.detect$Number <-
+  unlist(lapply(c(1, 5, 10, 20, 30, 50),
+                function(x) {sum(fData(object.segment.filtered)$DetectionRate >= x)}))
+
+plot.detect$Rate <- plot.detect$Number / nrow(fData(object.segment.filtered))
+rownames(plot.detect) <- plot.detect$Freq
+
+genes.detected.plot <- ggplot(plot.detect, aes(x = as.factor(Freq), y = Rate, fill = Rate)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = formatC(Number, format = "d", big.mark = ",")),
+            vjust = 1.6, color = "black", size = 4) +
+  scale_fill_gradient2(low = "orange2", mid = "lightblue",
+                       high = "dodgerblue3", midpoint = 0.65,
+                       limits = c(0,1),
+                       labels = scales::percent) +
+  theme_bw() +
+  scale_y_continuous(labels = scales::percent, limits = c(0,1),
+                     expand = expansion(mult = c(0, 0))) +
+  labs(x = "% of Segments",
+       y = "Genes Detected, % of Panel > loq")
+
+
+# Export a summary of the gene detection
+gene.detection.summary <- fData(object.segment.filtered) %>% 
+  select(any_of(c("segmentID", "DetectionRate", "DetectionThreshold")))
+
+export.gene.detection.summary <- FALSE
+
+if(export.gene.detection.summary == TRUE){
+  
+  write.csv(gene.detection.summary, "qc/gene_detection_summary.csv")
+  
+}
+
+```
+
+# Remove Genes
+
+```{r Remove Genes, include=include.qc}
+
+# Set the cutoff for gene detection
+study.gene.rate.cutoff <- 0.01
+
+# Subset for genes above the study gene detection rate cutoff
+# Manually include the negative control probe, for downstream use
+negative.probe.fData <- subset(fData(object.segment.filtered), CodeClass == "Negative")
+neg.probes <- unique(negative.probe.fData$TargetName)
+object.gene.filtered <- object.segment.filtered[fData(object.segment.filtered)$DetectionRate >= study.gene.rate.cutoff |
+                   fData(object.segment.filtered)$TargetName %in% neg.probes, ]
+
+```
+  
+# Normalization
+  
+```{r Normalization, include=include.qc}
+  
+    q3.normalization.output <- geomxNorm(
+                                  object = object.gene.filtered, 
+                                  norm = "q3")
+    
+    print(q3.normalization.output$multi.plot)
+    print(q3.normalization.output$boxplot.raw)
+    print(q3.normalization.output$boxplot.norm)
+    
+    neg.normalization.output <- geomxNorm(
+                                  object = object.gene.filtered, 
+                                  norm = "neg")
+    
+    print(neg.normalization.output$multi.plot)
+    print(neg.normalization.output$boxplot.raw)
+    print(neg.normalization.output$boxplot.norm)
+    
+    # Export normalized counts
+    export.counts <- FALSE
+    if(export.counts == TRUE){ 
+    
+      # Gather the counts
+      norm.counts <-  q3.normalization.output$object@assayData$q_norm
+      
+      # Write to csv
+      write.csv(norm.counts, 
+                file = paste0(results.folder, "q3_norm_counts.csv"))
+      
+      
+    }
+    
+```
+
+# Heatmaps of Most Variable Genes
+
+```{r Heatmap of Variable Genes, include=include.PCA}
+
+# Create a slot for log2 counts
+assayDataElement(object = q3.normalization.output$object, elt = "log_q") <-
+    assayDataApply(q3.normalization.output$object, 2, FUN = log, base = 2, elt = "q_norm")
+
+# Make a df from the log counts
+q3.norm.log.counts <- q3.normalization.output$object@assayData$log_q
+
+# create Coefficient of Variation (CV) function and apply to the log counts
+calc_CV <- function(x) {sd(x) / mean(x)}
+cv.df <- data.frame(CV = apply(q3.norm.log.counts, 1, calc_CV))
+
+# Take the top 500 most variable genes by CV score
+cv.df.top <- cv.df %>% arrange(desc(CV)) %>% slice(1:500)
+
+# Get the list of top CV genes
+top.cv.gene.list <- rownames(cv.df.top)
+
+# Subset the counts for the top CV genes
+top.cv.heatmap.counts <- q3.norm.log.counts[rownames(q3.norm.log.counts) %in% top.cv.gene.list, ]
+
+# Order the counts by top CV
+top.cv.heatmap.counts <- top.cv.heatmap.counts[match(top.cv.gene.list, rownames(top.cv.heatmap.counts)), ]
+
+anno.colors = list(
+      Tumor = c(Biopsy = "slateblue", 
+                PDX = "coral"), 
+      region = c(tumor = "pink",
+                 vessel = "seagreen1", 
+                 immune = "lightblue", 
+                 'immune/stroma' = "maroon"), 
+      segment = c(full_ROI = "lightsalmon", 
+                  LANA_pos = "aquamarine"), 
+      Source = c(Skin = "steelblue1", 
+                 GI = "indianred")
+      
+      )
+
+# Set up the annotation
+annotation <- pData(q3.normalization.output$object)
+
+annotation.heatmap <- annotation %>% 
+  select(names(anno.colors))
+
+cv.heatmap.all.samples <- pheatmap(top.cv.heatmap.counts, 
+         main = "Top 500 Variable Genes - All Samples", 
+         scale = "row",   
+         show_colnames = FALSE,
+         show_rownames = FALSE,
+         border_color = NA, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE, 
+         clustering_method = "average", 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         color = colorRampPalette(c("blue", "white", "red"))(120),
+         annotation_row = NULL, 
+         annotation_col = annotation.heatmap,  
+         annotation_colors = anno.colors)
+
+
+# Skin
+
+# Subset the annotation
+annotation.heatmap.skin <- annotation.heatmap %>% 
+  filter(Source == "Skin")
+
+# Get the sample IDs for skin
+skin.sample.IDs <- rownames(annotation.heatmap.skin)
+
+# Subset the counts files for only the skin samples
+top.cv.heatmap.counts.skin <- as.data.frame(top.cv.heatmap.counts) %>% 
+  select(all_of(skin.sample.IDs))
+
+cv.heatmap.skin <- pheatmap(top.cv.heatmap.counts.skin, 
+         main = "Top 500 Variable Genes - Skin Only", 
+         scale = "row",   
+         show_colnames = FALSE,
+         show_rownames = FALSE,
+         border_color = NA, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE, 
+         clustering_method = "average", 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         color = colorRampPalette(c("blue", "white", "red"))(120),
+         annotation_row = NULL, 
+         annotation_col = annotation.heatmap.skin,  
+         annotation_colors = anno.colors)
+
+
+# GI
+
+# Subset the annotation
+annotation.heatmap.gi <- annotation.heatmap %>% 
+  filter(Source == "GI")
+
+# Get the sample IDs for skin
+gi.sample.IDs <- rownames(annotation.heatmap.gi)
+
+# Subset the counts files for only the skin samples
+top.cv.heatmap.counts.gi <- as.data.frame(top.cv.heatmap.counts) %>% 
+  select(all_of(gi.sample.IDs))
+
+cv.heatmap.gi <- pheatmap(top.cv.heatmap.counts.gi, 
+         main = "Top 500 Variable Genes - GI Only", 
+         scale = "row",   
+         show_colnames = FALSE,
+         show_rownames = FALSE,
+         border_color = NA, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE, 
+         clustering_method = "average", 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         color = colorRampPalette(c("blue", "white", "red"))(120),
+         annotation_row = NULL, 
+         annotation_col = annotation.heatmap.gi,  
+         annotation_colors = anno.colors)
+
+
+# Export all CV heatmaps
+export.cv.heatmaps <- global.export.heatmap
+if(export.cv.heatmaps == TRUE){
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "cv_heatmap_all_samples.png"), 
+         cv.heatmap.all.samples, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "cv_heatmap_skin.png"), 
+         cv.heatmap.skin, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "cv_heatmap_gi.png"), 
+         cv.heatmap.gi, 
+         height = 10, 
+         width = 14)
+  
+}
+
+# nCounter overlapping samples
+
+ncounter.samples <- c("SB-18-4726", 
+                 "SB-22-25944",
+                 "SB-22-2963",
+                 "SB-22-696")
+
+annotation.heatmap.ncounter <- annotation %>% 
+  select(c(names(anno.colors), sample_name))
+
+annotation.heatmap.ncounter <- annotation.heatmap.ncounter %>% 
+  filter(sample_name %in% ncounter.samples)
+
+# Get the sample IDs for skin
+ncounter.sample.IDs <- rownames(annotation.heatmap.ncounter)
+
+# Subset the counts files for only the skin samples
+top.cv.heatmap.counts.ncounter <- as.data.frame(top.cv.heatmap.counts) %>% 
+  select(all_of(ncounter.sample.IDs))
+
+cv.heatmap.ncounter <- pheatmap(top.cv.heatmap.counts.ncounter, 
+         main = "Top 500 Variable Genes - nCounter samples", 
+         scale = "row",   
+         show_colnames = FALSE,
+         show_rownames = FALSE,
+         border_color = NA, 
+         cluster_rows = TRUE, 
+         cluster_cols = TRUE, 
+         clustering_method = "average", 
+         clustering_distance_rows = "correlation", 
+         clustering_distance_cols = "correlation", 
+         color = colorRampPalette(c("blue", "white", "red"))(120),
+         annotation_row = NULL, 
+         annotation_col = annotation.heatmap.ncounter,  
+         annotation_colors = anno.colors)
+
+
+```
+
+
+
+# Count AOIs per annotation
+
+```{r Count AOIs per annotation, include=TRUE}
+
+# nCounter/DSP Samples
+dsp.samples <- c("SB-18-4726", 
+                 "SB-22-25944",
+                 "SB-22-2963",
+                 "SB-22-696")
+
+# Subset for annotation types to count
+annotation.subset <- annotation %>% 
+  select(segment, region, class, Tumor, Source, sample_name) %>% 
+  filter(sample_name %in% dsp.samples)
+  
+
+aoi.counts <- lapply(annotation.subset, table)
+
+print(aoi.counts)
+
+```
+
+# PCA Analysis
+
+```{r PCA Setup, include=include.qc}
+
+object <- q3.normalization.output$object
+
+dsp.samples <- c("SB-18-4726", 
+                 "SB-22-25944",
+                 "SB-22-2963",
+                 "SB-22-696")
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples)
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Load the normalized counts
+norm.counts <- lmm.input$subset.object@assayData$q_norm
+
+log.counts <- as.data.frame(log(norm.counts, base = 2))
+
+# Load and clean up the annotation
+annotation <- pData(lmm.input$subset.object)
+
+# Order of rownames of annotation need to match columns of count data
+cleaned.annotation.df <- annotation[order(rownames(annotation)), ]
+
+log.counts.cleaned <- as.data.frame(log.counts[, order(colnames(log.counts))])
+
+# Create a function for the main PCA annotations
+main_annotation_PCA <- function(pca.table){
+  
+  # Create a PCA for the main annotations, then group together
+  
+  pca.plot.slide <- biplot(pca.table, 
+                         colby = "slide_name", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = NULL, 
+                         subtitle = "Slide Analysis")
+                         
+  pca.plot.region <- biplot(pca.table, 
+                         colby = "region", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = NULL, 
+                         subtitle = "Region analysis")
+  
+  pca.plot.segment <- biplot(pca.table, 
+                         colby = "segment", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = NULL, 
+                         subtitle = "Segment Analysis")
+  
+  pca.plot.class <- biplot(pca.table, 
+                         colby = "class", 
+                         legendPosition = "right", 
+                         legendLabSize = 10, 
+                         legendIconSize = 5, 
+                         lab = NULL,
+                         title = NULL, 
+                         subtitle = "Class Analysis")
+  
+  
+  combined.plot <- arrangeGrob(ggplotGrob(pca.plot.slide), 
+                               ggplotGrob(pca.plot.region), 
+                               ggplotGrob(pca.plot.segment), 
+                               ggplotGrob(pca.plot.class), 
+                               nrow = 2, ncol = 2)
+  
+  return(combined.plot)
+  
+}
+
+# Subset annotation
+annotation.subset <- cleaned.annotation.df %>% 
+  filter(region %in% c(""))
+
+# Subset counts
+log.counts.subset <- log.counts.cleaned %>% 
+  select(rownames(annotation.subset))
+
+
+# Make the PCA table
+pca.dsp.samples <- pca(log.counts.cleaned, 
+                 metadata = annotation, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+dsp.samples.pca <- main_annotation_PCA(pca.table = pca.dsp.samples)
+
+grid.draw(dsp.samples.pca)
+
+# PCA biplot for CD4 count
+pca.plot.cd4.count <- biplot(pca.dsp.samples, 
+                       colby = "CD4_count", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP/nCounter Samples")
+
+if(global.export.PCA == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, "main_annotations_pca.pdf"), all.aoi.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, "main_annotations_pca.pdf"), all.aoi.pca, width = 14, height = 12)
+  
+}
+
+```
+
+# Differential Expression
+
+### Setup
+
+```{r DE Setup, include=FALSE}
+
+# Set up annotation colors for the heatmaps
+anno.colors = list(
+      Tumor = c(Biopsy = "slateblue", 
+                PDX = "coral"), 
+      region = c(tumor = "pink",
+                 vessel = "seagreen1", 
+                 immune = "lightblue", 
+                 'immune/stroma' = "maroon"), 
+      segment = c(full_ROI = "lightsalmon", 
+                  LANA_pos = "aquamarine"), 
+      Source = c(Skin = "steelblue1", 
+                 GI = "indianred"), 
+      CD4_count = c(High = "darkgoldenrod2", 
+                    Low = "cadetblue")
+      )
+
+dsp.samples <- c("SB-18-4726", 
+                 "SB-22-25944",
+                 "SB-22-2963",
+                 "SB-22-696")
+
+# Load the DE results from nCounter for the nCounter/DSP overlapping samples
+ncounter.results <- read.csv("/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/Results/June2024/DE_results_dsp_samples.csv")
+
+```
+
+### Tumor AOIs
+
+```{r, include=include.DE}
+
+contrast.name <- "overlap_dsp_tumor_AOIs"
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "region" = c("tumor"))
+
+
+# Filter data for the chosen annotations
+object <- q3.normalization.output$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_object_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print("-----------------------------------")
+print(summary.table)
+
+
+results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Between Groups", 
+                        region.col = "region", 
+                        regions = c("tumor"), 
+                        group.col = "CD4_count", 
+                        groups = c("High", "Low"), 
+                        n.cores = parallel::detectCores())
+  
+# Create the results df
+results.df <- results.list$results
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+if(global.export.de == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, contrast.name, "_de_results.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "DSP Samples, Tumor AOIs", 
+                               x.axis.title = "High vs. Low")
+
+# Export the volcano
+if(global.export.de == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+print(volcano.output$volcano.plot)
+
+# Make the heatmap
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors))
+
+heatmap.plot <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = FALSE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL, 
+  show.rownames = TRUE)
+
+print(heatmap.plot)
+
+if(global.export.de == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, contrast.name, "_heatmap_plot.png"), 
+         width = 24, 
+         height = 16)
+  
+}
+
+# Subset annotation
+annotation.subset <- cleaned.annotation.df %>% 
+  filter(region %in% c("tumor"))
+
+# Subset counts
+log.counts.subset <- log.counts.cleaned %>% 
+  select(rownames(annotation.subset))
+
+
+# Make the PCA table
+pca.table <- pca(log.counts.subset, 
+                 metadata = annotation.subset, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+
+grid.draw(main.annotation.pca)
+
+# PCA biplot for CD4 count
+pca.plot.cd4.count <- biplot(pca.table, 
+                       colby = "CD4_count", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP/nCounter Samples", 
+                       )
+
+print(pca.plot.cd4.count)
+
+if(global.export.de == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_main_pca.png"), main.annotation.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_cd4_count_pca.png"), pca.plot.cd4.count, width = 14, height = 12)
+  
+}
+
+```
+
+#### Compare to nCounter DE results
+
+```{r}
+
+# Results for nCounter DEGs from DSP DE
+
+# Grab the gene list
+ncounter.genes <- ncounter.results$gene
+
+# Subset for the nCounter DEGs
+ncounter.sig.genes <- ncounter.results %>% 
+  filter(padj < 0.05 & log2FoldChange < -1 | log2FoldChange > 1 ) %>% 
+  select(c(gene, log2FoldChange, pvalue, padj))
+
+# Get the nCounter DE gene names
+ncounter.sig.gene.list <- ncounter.sig.genes$gene
+
+# Subset the DSP DE results for the nCounter genes
+results.df.filter <- results.df %>% 
+  filter(gene %in% ncounter.genes)
+
+# Get the results for nCounter DEGs from the DSP DE analysis
+results.df.filter.sig.genes <- results.df %>% 
+  filter(gene %in% ncounter.sig.gene.list)
+
+print("nCounter DEGs")
+print(ncounter.sig.genes)
+
+print("DSP results for nCounter DEGs")
+print(results.df.filter.sig.genes)
+
+# Results for DSP DEGs from nCounter DE
+
+# Get the DEGs from the DSP DE analysis
+DSP.DEGs.all <- results.df %>% 
+  filter(padj < 0.05 & (logfc < -1 | logfc > 1))
+
+# Gather the DEG names
+DSP.de.gene.list <- DSP.DEGs.all$gene
+
+# Gather only the genes from the ncounter that are also DEGs in the DSP DE
+ncounter.dsp.degs <- ncounter.results %>% 
+  filter(gene %in% DSP.de.gene.list) %>% 
+  select(c(gene, log2FoldChange, pvalue, padj))
+
+# Gather a list of DSP DEGs also found in the nCounter analysis
+DSP.DEGs.subset <- DSP.DEGs.all %>% 
+  filter(gene %in% ncounter.dsp.degs$gene)
+
+print("All DSP DEGs")
+print(DSP.DEGs.all)
+
+print("DSP DEGs also in nCounter")
+print(DSP.DEGs.subset)
+
+print("nCounter results for DSP DEGs")
+print(ncounter.dsp.degs)
+
+```
+
+
+### LANA+ AOIs
+
+```{r, include=include.DE}
+
+contrast.name <- "overlap_dsp_LANA_AOIs"
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "segment" = c("LANA_pos"))
+
+# Filter data for the chosen annotations
+object <- q3.normalization.output$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print("-----------------------------------")
+print(summary.table)
+
+
+results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Between Groups", 
+                        region.col = "segment", 
+                        regions = c("LANA_pos"), 
+                        group.col = "CD4_count", 
+                        groups = c("High", "Low"), 
+                        n.cores = parallel::detectCores())
+  
+# Create the results df
+results.df <- results.list$results
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+if(global.export.de == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, contrast.name, "_de_results.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "DSP Samples, LANA+ AOIs", 
+                               x.axis.title = "High vs. Low", 
+                               fc.limit = 1)
+
+custom.volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = "LANA+ AOIs High vs. Low CD4 Count", 
+                               legend.title = "High CD4 Count AOI Expression", 
+                               x.axis.title = "High vs. Low CD4 Count", 
+                               custom.gene.labels <- c("STC1", 
+                                                       "MKI67", 
+                                                       "LYVE1", 
+                                                       "TSPAN15", 
+                                                       "ICAM1", 
+                                                       "UNC5B", 
+                                                       "CYB5RL", 
+                                                       "PDGFRB", 
+                                                       "NOTCH3"), 
+                               fc.limit = 1)
+
+# Export the volcano
+if(global.export.de == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+print(volcano.output$volcano.plot)
+
+# Make the heatmap
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors))
+
+heatmap.plot <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = FALSE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL)
+
+print(heatmap.plot)
+
+if(global.export.de == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+
+# Subset annotation
+annotation.subset <- cleaned.annotation.df %>% 
+  filter(segment %in% c("LANA_pos"))
+
+# Subset counts
+log.counts.subset <- log.counts.cleaned %>% 
+  select(rownames(annotation.subset))
+
+
+# Make the PCA table
+pca.table <- pca(log.counts.subset, 
+                 metadata = annotation.subset, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+
+grid.draw(main.annotation.pca)
+
+# PCA biplot for CD4 count
+pca.plot.cd4.count <- biplot(pca.table, 
+                       colby = "CD4_count", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP/nCounter Samples LANA AOIs")
+
+print(pca.plot.cd4.count)
+
+if(global.export.de == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_main_pca.png"), main.annotation.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_cd4_count_pca.png"), pca.plot.cd4.count, width = 14, height = 12)
+  
+}
+
+```
+
+#### Compare to nCounter DE results
+
+```{r}
+
+# Results for nCounter DEGs from DSP DE
+
+# Grab the gene list
+ncounter.genes <- ncounter.results$gene
+
+# Subset for the nCounter DEGs
+ncounter.sig.genes <- ncounter.results %>% 
+  filter(padj < 0.05 & log2FoldChange < -1 | log2FoldChange > 1 ) %>% 
+  select(c(gene, log2FoldChange, pvalue, padj))
+
+# Get the nCounter DE gene names
+ncounter.sig.gene.list <- ncounter.sig.genes$gene
+
+# Subset the DSP DE results for the nCounter genes
+results.df.filter <- results.df %>% 
+  filter(gene %in% ncounter.genes)
+
+# Get the results for nCounter DEGs from the DSP DE analysis
+results.df.filter.sig.genes <- results.df %>% 
+  filter(gene %in% ncounter.sig.gene.list)
+
+print("nCounter DEGs")
+print(ncounter.sig.genes)
+
+print("DSP results for nCounter DEGs")
+print(results.df.filter.sig.genes)
+
+# Results for DSP DEGs from nCounter DE
+
+# Get the DEGs from the DSP DE analysis
+DSP.DEGs.all <- results.df %>% 
+  filter(padj < 0.05 & (logfc < -1 | logfc > 1))
+
+# Gather the DEG names
+DSP.de.gene.list <- DSP.DEGs.all$gene
+
+# Gather only the genes from the ncounter that are also DEGs in the DSP DE
+ncounter.dsp.degs <- ncounter.results %>% 
+  filter(gene %in% DSP.de.gene.list) %>% 
+  select(c(gene, log2FoldChange, pvalue, padj))
+
+# Gather a list of DSP DEGs also found in the nCounter analysis
+DSP.DEGs.subset <- DSP.DEGs.all %>% 
+  filter(gene %in% ncounter.dsp.degs$gene)
+
+print("All DSP DEGs")
+print(DSP.DEGs.all)
+
+print("DSP DEGs also in nCounter")
+print(DSP.DEGs.subset)
+
+print("nCounter results for DSP DEGs")
+print(ncounter.dsp.degs)
+
+```
+
+#### GSEA preranked
+
+```{r}
+
+# Gather the signal to noise ratio for GSEA ranking
+# Default method for ranking genes from GSEA manual:
+# https://www.gsea-msigdb.org/gsea/doc/GSEAUserGuideTEXT.htm#_Metrics_for_Ranking
+
+# Define the main contrast groups
+contrast.field <- "CD4_count"
+contrast.levels <- c("High", "Low")
+
+# Gather the annotation, sample IDs, and log counts for each contrast
+
+# Contrast level A is the "condition" (positive when calculating fold change)
+contrast.A.annotation <- lmm.input$annotation %>% 
+  filter(!!sym(contrast.field) == contrast.levels[1])
+
+contrast.A.sampleIDs <- rownames(contrast.A.annotation)
+
+contrast.A.counts <- as.data.frame(lmm.input$log.counts) %>% 
+  select(all_of(contrast.A.sampleIDs))
+
+contrast.A.counts$gene <- rownames(contrast.A.counts)
+
+# Contrast level B is the "reference" (negative when calculating fold change)
+
+contrast.field <- "CD4_count"
+contrast.levels <- c("High", "Low")
+
+contrast.B.annotation <- lmm.input$annotation %>% 
+  filter(!!sym(contrast.field) == contrast.levels[2])
+
+contrast.B.sampleIDs <- rownames(contrast.B.annotation)
+
+contrast.B.counts <- as.data.frame(lmm.input$log.counts) %>% 
+  select(all_of(contrast.B.sampleIDs))
+
+contrast.B.counts$gene <- rownames(contrast.B.counts)
+
+# Add a column to each contrast level for the mean and standard deviation
+contrast.A.counts <- contrast.A.counts %>% 
+  mutate(mean.A = rowMeans(select_if(., is.numeric))) %>%  
+  mutate(stdev.A = apply(select_if(., is.numeric), 1, sd))
+
+contrast.B.counts <- contrast.B.counts %>% 
+  mutate(mean.B = rowMeans(select_if(., is.numeric))) %>%  
+  mutate(stdev.B = apply(select_if(., is.numeric), 1, sd))
+
+GSEA.preanked.df <- merge(contrast.A.counts, contrast.B.counts, by = "gene")
+
+GSEA.preanked.df <- GSEA.preanked.df %>% 
+  mutate(signal2noise = (mean.A - mean.B)/(stdev.A + stdev.B)) %>% 
+  arrange(desc(signal2noise)) %>% 
+  select(c(gene, mean.A, mean.B, stdev.A, stdev.B, signal2noise))
+
+if(export.gsea.input == TRUE){
+  
+  write.csv(GSEA.preanked.df, file = paste0(results.folder, run.folder, "GSEA/", contrast.name, "_gsea_preranked_input.csv"), row.names = FALSE)
+  
+}
+```
+
+### Full ROI AOIs
+
+```{r, include=include.DE}
+
+contrast.name <- "overlap_dsp_full_ROI_AOIs"
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "segment" = c("full_ROI"))
+
+# Filter data for the chosen annotations
+object <- q3.normalization.output$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print("-----------------------------------")
+print(summary.table)
+
+
+results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Between Groups", 
+                        region.col = "segment", 
+                        regions = c("full_ROI"), 
+                        group.col = "CD4_count", 
+                        groups = c("High", "Low"), 
+                        n.cores = parallel::detectCores())
+  
+# Create the results df
+results.df <- results.list$results
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+if(global.export.de == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, contrast.name, "_de_results.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "DSP Samples, full ROI AOIs", 
+                               x.axis.title = "High vs. Low")
+
+# Export the volcano
+if(global.export.de == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+print(volcano.output$volcano.plot)
+
+# Make the heatmap
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors))
+
+heatmap.plot <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = FALSE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL)
+
+print(heatmap.plot)
+
+if(global.export.de == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+
+# Subset annotation
+annotation.subset <- cleaned.annotation.df %>% 
+  filter(segment %in% c("full_ROI"))
+
+# Subset counts
+log.counts.subset <- log.counts.cleaned %>% 
+  select(rownames(annotation.subset))
+
+
+# Make the PCA table
+pca.table <- pca(log.counts.subset, 
+                 metadata = annotation.subset, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+
+grid.draw(main.annotation.pca)
+
+# PCA biplot for CD4 count
+pca.plot.cd4.count <- biplot(pca.table, 
+                       colby = "CD4_count", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP/nCounter Samples full ROI AOIs")
+
+print(pca.plot.cd4.count)
+
+if(global.export.de == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_main_pca.png"), main.annotation.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_cd4_count_pca.png"), pca.plot.cd4.count, width = 14, height = 12)
+  
+}
+
+
+```
+
+#### Compare to nCounter
+
+```{r}
+
+# Results for nCounter DEGs from DSP DE
+
+# Grab the gene list
+ncounter.genes <- ncounter.results$gene
+
+# Subset for the nCounter DEGs
+ncounter.sig.genes <- ncounter.results %>% 
+  filter(padj < 0.05 & log2FoldChange < -1 | log2FoldChange > 1 ) %>% 
+  filter(log2FoldChange) %>% 
+  select(c(gene, log2FoldChange, pvalue, padj))
+
+# Get the nCounter DE gene names
+ncounter.sig.gene.list <- ncounter.sig.genes$gene
+
+# Subset the DSP DE results for the nCounter genes
+results.df.filter <- results.df %>% 
+  filter(gene %in% ncounter.genes)
+
+# Get the results for nCounter DEGs from the DSP DE analysis
+results.df.filter.sig.genes <- results.df %>% 
+  filter(gene %in% ncounter.sig.gene.list)
+
+print("nCounter DEGs")
+print(ncounter.sig.genes)
+
+print("DSP results for nCounter DEGs")
+print(results.df.filter.sig.genes)
+
+# Results for DSP DEGs from nCounter DE
+
+# Get the DEGs from the DSP DE analysis
+DSP.DEGs.all <- results.df %>% 
+  filter(padj < 0.05 & (logfc < -1 | logfc > 1))
+
+# Gather the DEG names
+DSP.de.gene.list <- DSP.DEGs.all$gene
+
+# Gather only the genes from the ncounter that are also DEGs in the DSP DE
+ncounter.dsp.degs <- ncounter.results %>% 
+  filter(gene %in% DSP.de.gene.list) %>% 
+  select(c(gene, log2FoldChange, pvalue, padj))
+
+# Gather a list of DSP DEGs also found in the nCounter analysis
+DSP.DEGs.subset <- DSP.DEGs.all %>% 
+  filter(gene %in% ncounter.dsp.degs$gene)
+
+print("All DSP DEGs")
+print(DSP.DEGs.all)
+
+print("DSP DEGs also in nCounter")
+print(DSP.DEGs.subset)
+
+print("nCounter results for DSP DEGs")
+print(ncounter.dsp.degs)
+
+```
+
+## DE NOT considering CD4 count
+
+### Tumor versus vessel
+
+```{r, include=include.DE}
+
+contrast.name <- "overlap_dsp_tumor_vessel"
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "region" = c("tumor", "vessel"))
+
+# Filter data for the chosen annotations
+object <- q3.normalization.output$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print("-----------------------------------")
+print(summary.table)
+
+
+results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Between Groups", 
+                        region.col = "Source", 
+                        regions = c("Skin"), 
+                        group.col = "region", 
+                        groups = c("tumor", "vessel"), 
+                        n.cores = parallel::detectCores())
+  
+# Create the results df
+results.df <- results.list$results
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+if(global.export.de == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, contrast.name, "_de_results.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "DSP Samples, all AOIs", 
+                               x.axis.title = "Tumor vs. Vessel")
+
+# Export the volcano
+if(global.export.de == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+print(volcano.output$volcano.plot)
+
+# Make the heatmap
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors))
+
+heatmap.plot <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = FALSE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL)
+
+print(heatmap.plot)
+
+if(global.export.de == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+
+# Subset annotation
+annotation.subset <- cleaned.annotation.df %>% 
+  filter(region %in% c("tumor", "vessel"))
+
+# Subset counts
+log.counts.subset <- log.counts.cleaned %>% 
+  select(rownames(annotation.subset))
+
+
+# Make the PCA table
+pca.table <- pca(log.counts.subset, 
+                 metadata = annotation.subset, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+
+grid.draw(main.annotation.pca)
+
+print(pca.plot.cd4.count)
+
+if(global.export.de == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_main_pca.png"), main.annotation.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_cd4_count_pca.png"), pca.plot.cd4.count, width = 14, height = 12)
+  
+}
+
+
+```
+
+### Tumor Full_ROI versus LANA+
+
+```{r, include=include.DE}
+
+contrast.name <- "overlap_dsp_full_ROI_v_LANA"
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples)
+
+# Filter data for the chosen annotations
+object <- q3.normalization.output$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list)))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print("-----------------------------------")
+print(summary.table)
+
+
+results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Within Groups", 
+                        region.col = "segment", 
+                        regions = c("full_ROI", "LANA_pos"), 
+                        group.col = "Source", 
+                        groups = c("Skin"), 
+                        n.cores = parallel::detectCores())
+  
+# Create the results df
+results.df <- results.list$results
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+if(global.export.de == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, contrast.name, "_de_results.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "DSP Samples, all AOIs", 
+                               x.axis.title = "full ROI vs LANA +")
+
+# Export the volcano
+if(global.export.de == TRUE){ 
+  ggsave(filename = paste0(results.folder, run.folder, contrast.name, "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+print(volcano.output$volcano.plot)
+
+# Make the heatmap
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors))
+
+heatmap.plot <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = FALSE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL)
+
+print(heatmap.plot)
+
+if(global.export.de == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+
+# Subset annotation
+annotation.subset <- cleaned.annotation.df
+
+# Subset counts
+log.counts.subset <- log.counts.cleaned %>% 
+  select(rownames(annotation.subset))
+
+
+# Make the PCA table
+pca.table <- pca(log.counts.subset, 
+                 metadata = annotation.subset, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+
+grid.draw(main.annotation.pca)
+
+if(global.export.de == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_main_pca.png"), main.annotation.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_cd4_count_pca.png"), pca.plot.cd4.count, width = 14, height = 12)
+  
+}
+
+
+```
+
+
+### LANA+ versus Vessel
+
+```{r, include=include.DE}
+
+contrast.name <- "overlap_dsp_LANA_v_Vessel"
+
+# Set up the normalized object to subset
+object <- q3.normalization.output$object
+
+# Add the ROI number to the segment ID
+pData(object) <- pData(object) %>% 
+  mutate(aoi_ID = paste0(segmentID, ROI_ID))
+
+# Gather the column names to be used in defining contrasts for LANA
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "segment" = "LANA_pos")
+
+# Subset for LANA+
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Get the AOIs for LANA+
+lana.pos.aois <- lmm.input$annotation$aoi_ID
+
+# Gather the column names to be used in defining contrasts for Vessel
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "region" = "vessel")
+
+# Subset for Vessel
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Get the AOIs for LANA+
+vessel.aois <- lmm.input$annotation$aoi_ID
+
+# Join the AOIs from both groups
+lana.vessel.aois <- c(lana.pos.aois, vessel.aois)
+
+# Subset for only the LANA+ and Vessel AOIs
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "aoi_ID" = lana.vessel.aois)
+
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(region, segment, )
+
+summary.table <- table(summary.table.df)
+
+results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Within Groups", 
+                        region.col = "region", 
+                        regions = c("tumor", "vessel"), 
+                        group.col = "Source", 
+                        groups = c("Skin"), 
+                        n.cores = parallel::detectCores())
+  
+# Create the results df
+results.df <- results.list$results
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+if(global.export.de == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, contrast.name, "_de_results.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "LANA+ AOI Expression", 
+                               x.axis.title = "LANA + vs. Vessel")
+
+custom.volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "LANA+ AOI Expression", 
+                               x.axis.title = "LANA + vs. Vessel", 
+                               custom.gene.labels <- c("STC1", 
+                                                       "MKI67", 
+                                                       "LYVE1", 
+                                                       "TSPAN15", 
+                                                       "ICAM1", 
+                                                       "UNC5B", 
+                                                       "CYB5RL", 
+                                                       "PDGFRB", 
+                                                       "NOTCH3"))
+
+# Export the volcano
+if(global.export.de == TRUE){ 
+  ggsave(volcano.output$volcano.plot, 
+         filename = paste0(results.folder, 
+                           run.folder, 
+                           contrast.name, 
+                           "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+print(volcano.output$volcano.plot)
+
+# Make the heatmap
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors))
+
+heatmap.plot <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = FALSE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL)
+
+print(heatmap.plot)
+
+if(global.export.de == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+
+# Make the PCA table
+pca.table <- pca(lmm.input$subset.object@assayData$log_q, 
+                 metadata = lmm.input$annotation, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+
+grid.draw(main.annotation.pca)
+
+# PCA biplot for CD4 count
+pca.plot.cd4.count <- biplot(pca.table, 
+                       colby = "CD4_count", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP-nCounter Samples")
+
+
+
+if(global.export.de == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_main_pca.png"), main.annotation.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_cd4_count_pca.png"), pca.plot.cd4.count, width = 14, height = 12)
+  
+}
+
+
+```
+
+
+#### GSEA preranked
+
+```{r}
+
+# Gather the signal to noise ratio for GSEA ranking
+# Default method for ranking genes from GSEA manual:
+# https://www.gsea-msigdb.org/gsea/doc/GSEAUserGuideTEXT.htm#_Metrics_for_Ranking
+
+# Define the main contrast groups
+contrast.field <- "segment"
+contrast.levels <- c("LANA_pos")
+
+# Gather the annotation, sample IDs, and log counts for each contrast
+
+# Contrast level A is the "condition" (positive when calculating fold change)
+contrast.A.annotation <- lmm.input$annotation %>% 
+  filter(!!sym(contrast.field) == contrast.levels[1])
+
+contrast.A.sampleIDs <- rownames(contrast.A.annotation)
+
+contrast.A.counts <- as.data.frame(lmm.input$log.counts) %>% 
+  select(all_of(contrast.A.sampleIDs))
+
+contrast.A.counts$gene <- rownames(contrast.A.counts)
+
+# Contrast level B is the "reference" (negative when calculating fold change)
+
+contrast.field <- "region"
+contrast.levels <- c("tumor", "vessel")
+
+contrast.B.annotation <- lmm.input$annotation %>% 
+  filter(!!sym(contrast.field) == contrast.levels[2])
+
+contrast.B.sampleIDs <- rownames(contrast.B.annotation)
+
+contrast.B.counts <- as.data.frame(lmm.input$log.counts) %>% 
+  select(all_of(contrast.B.sampleIDs))
+
+contrast.B.counts$gene <- rownames(contrast.B.counts)
+
+# Add a column to each contrast level for the mean and standard deviation
+contrast.A.counts <- contrast.A.counts %>% 
+  mutate(mean.A = rowMeans(select_if(., is.numeric))) %>%  
+  mutate(stdev.A = apply(select_if(., is.numeric), 1, sd))
+
+contrast.B.counts <- contrast.B.counts %>% 
+  mutate(mean.B = rowMeans(select_if(., is.numeric))) %>%  
+  mutate(stdev.B = apply(select_if(., is.numeric), 1, sd))
+
+GSEA.preanked.df <- merge(contrast.A.counts, contrast.B.counts, by = "gene")
+
+GSEA.preanked.df <- GSEA.preanked.df %>% 
+  mutate(signal2noise = (mean.A - mean.B)/(stdev.A + stdev.B)) %>% 
+  arrange(desc(signal2noise)) %>% 
+  select(c(gene, mean.A, mean.B, stdev.A, stdev.B, signal2noise))
+
+if(export.gsea.input == TRUE){
+  
+  write.csv(GSEA.preanked.df, file = paste0(results.folder, run.folder, "GSEA/", contrast.name, "_gsea_preranked_input.csv"), row.names = FALSE)
+  
+}
+```
+
+### LANA+ versus Vessel and Immune
+
+```{r, include=include.DE}
+
+contrast.name <- "overlap_dsp_LANA_v_VesselImmune"
+
+# Set up the normalized object to subset
+object <- q3.normalization.output$object
+
+# Add the ROI number to the segment ID
+pData(object) <- pData(object) %>% 
+  mutate(aoi_ID = paste0(segmentID, ROI_ID))
+
+# Gather the column names to be used in defining contrasts for LANA
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "segment" = "LANA_pos")
+
+# Subset for LANA+
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Get the AOIs for LANA+
+lana.pos.aois <- lmm.input$annotation$aoi_ID
+
+# Gather the column names to be used in defining contrasts for Vessel
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "region" = "vessel")
+
+# Subset for Vessel
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Get the AOIs for vessels 
+vessel.aois <- lmm.input$annotation$aoi_ID
+
+# Gather the column names to be used in defining contrasts for Immune
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "region" = "immune")
+
+# Subset for Vessel
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Get the AOIs for immune 
+immune.aois <- lmm.input$annotation$aoi_ID
+
+# Join the AOIs from both groups
+lana.vessel.immune.aois <- c(lana.pos.aois, vessel.aois, immune.aois)
+
+# Subset for only the LANA+ and Vessel AOIs
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples, 
+  "aoi_ID" = lana.vessel.immune.aois)
+
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(region, segment, )
+
+summary.table <- table(summary.table.df)
+
+results.list <- diffExpr(object = lmm.input$subset.object, 
+                        analysis.type = "Within Groups", 
+                        region.col = "infected with KSHV", 
+                        regions = c("T", "F"), 
+                        group.col = "Source", 
+                        groups = c("Skin"), 
+                        n.cores = parallel::detectCores())
+  
+# Create the results df
+results.df <- results.list$results
+
+# Adjust column names
+logfc.column <- colnames(results.df[grepl("logFC",colnames(results.df))])
+results.df$logfc <- results.df[[logfc.column]]
+
+pval.column <- colnames(results.df[grepl("_pval",colnames(results.df))])
+results.df$pval <- results.df[[pval.column]]
+
+adj.pval.column <- colnames(results.df[grepl("adjpval",colnames(results.df))])
+results.df$padj <- results.df[[adj.pval.column]]
+
+results.df$gene <- results.df$Gene
+
+# Keep only the necessary columns
+results.df <- results.df %>% select(c("gene", 
+                                      "logfc", 
+                                      "pval", 
+                                      "padj"))
+
+
+# Export the results
+if(global.export.de == TRUE){ 
+  write.csv(results.df, 
+            file = paste0(results.folder, run.folder, contrast.name, "_de_results.csv"), 
+            row.names = FALSE)  
+}
+
+# Make the volcano plot
+volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = contrast.name, 
+                               legend.title = "DSP nCounter Samples", 
+                               x.axis.title = "LANA + vs. Vessel")
+
+custom.volcano.output <- make_volcano(lmm.results = results.df, 
+                               title = "LANA+ AOIs vs. LANA- Vessel and Immune AOIs",
+                               fc.limit = 1, 
+                               legend.title = "LANA+ AOI Expression", 
+                               x.axis.title = "LANA + vs. Vessel and Immune", 
+                               custom.gene.labels <- c("STC1", 
+                                                       "MKI67", 
+                                                       "LYVE1", 
+                                                       "TSPAN15", 
+                                                       "ICAM1", 
+                                                       "UNC5B", 
+                                                       "CYB5RL", 
+                                                       "PDGFRB", 
+                                                       "NOTCH3"))
+
+# Export the volcano
+if(global.export.de == TRUE){ 
+  ggsave(volcano.output$volcano.plot, 
+         filename = paste0(results.folder, 
+                           run.folder, 
+                           contrast.name, 
+                           "_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+}
+
+print(volcano.output$volcano.plot)
+
+# Make the heatmap
+
+# Subset the annotation just for the heatmap annotations of interest
+annotation.heatmap <- lmm.input$annotation %>% 
+  select(names(anno.colors))
+
+heatmap.plot <- make_heatmap(
+  normalized.log.counts.df = lmm.input$log.counts, 
+  de.results = results.df, 
+  top.degs = TRUE, 
+  annotation.column = annotation.heatmap,
+  annotation.row = NULL, 
+  anno.colors = anno.colors, 
+  cluster.rows = FALSE, 
+  cluster.columns = TRUE, 
+  main.title = contrast.name, 
+  row.gaps = NULL, 
+  column.gaps = NULL)
+
+print(heatmap.plot)
+
+if(global.export.de == TRUE){
+  
+  ggsave(heatmap.plot, 
+         filename = paste0(results.folder, run.folder, contrast.name, "_heatmap_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+}
+
+# Make the PCA table
+pca.table <- pca(lmm.input$subset.object@assayData$log_q, 
+                 metadata = lmm.input$annotation, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+
+grid.draw(main.annotation.pca)
+
+# PCA biplot for CD4 count
+pca.plot.cd4.count <- biplot(pca.table, 
+                       colby = "CD4_count", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP-nCounter Samples")
+
+
+
+if(global.export.de == TRUE){
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_main_pca.png"), main.annotation.pca, width = 14, height = 12)
+  
+  ggsave(paste0(results.folder, run.folder, contrast.name, "_cd4_count_pca.png"), pca.plot.cd4.count, width = 14, height = 12)
+  
+}
+
+
+```
+
+#### GSEA preranked
+
+```{r}
+
+# Gather the signal to noise ratio for GSEA ranking
+# Default method for ranking genes from GSEA manual:
+# https://www.gsea-msigdb.org/gsea/doc/GSEAUserGuideTEXT.htm#_Metrics_for_Ranking
+
+# Define the main contrast groups
+contrast.field <- "segment"
+contrast.levels <- c("LANA_pos", "full_ROI")
+
+# Gather the annotation, sample IDs, and log counts for each contrast
+
+# Contrast level A is the "condition" (positive when calculating fold change)
+contrast.A.annotation <- lmm.input$annotation %>% 
+  filter(!!sym(contrast.field) == contrast.levels[1])
+
+contrast.A.sampleIDs <- rownames(contrast.A.annotation)
+
+contrast.A.counts <- as.data.frame(lmm.input$log.counts) %>% 
+  select(all_of(contrast.A.sampleIDs))
+
+contrast.A.counts$gene <- rownames(contrast.A.counts)
+
+# Contrast level B is the "reference" (negative when calculating fold change)
+
+contrast.B.annotation <- lmm.input$annotation %>% 
+  filter(!!sym(contrast.field) == contrast.levels[2])
+
+contrast.B.sampleIDs <- rownames(contrast.B.annotation)
+
+contrast.B.counts <- as.data.frame(lmm.input$log.counts) %>% 
+  select(all_of(contrast.B.sampleIDs))
+
+contrast.B.counts$gene <- rownames(contrast.B.counts)
+
+# Add a column to each contrast level for the mean and standard deviation
+contrast.A.counts <- contrast.A.counts %>% 
+  mutate(mean.A = rowMeans(select_if(., is.numeric))) %>%  
+  mutate(stdev.A = apply(select_if(., is.numeric), 1, sd))
+
+contrast.B.counts <- contrast.B.counts %>% 
+  mutate(mean.B = rowMeans(select_if(., is.numeric))) %>%  
+  mutate(stdev.B = apply(select_if(., is.numeric), 1, sd))
+
+GSEA.preanked.df <- merge(contrast.A.counts, contrast.B.counts, by = "gene")
+
+GSEA.preanked.df <- GSEA.preanked.df %>% 
+  mutate(signal2noise = (mean.A - mean.B)/(stdev.A + stdev.B)) %>% 
+  arrange(desc(signal2noise)) %>% 
+  select(c(gene, mean.A, mean.B, stdev.A, stdev.B, signal2noise))
+
+if(export.gsea.input == TRUE){
+  
+  write.csv(GSEA.preanked.df, file = paste0(results.folder, run.folder, "GSEA/", contrast.name, "_gsea_preranked_input.csv"), row.names = FALSE)
+  
+}
+
+```
+
+
+# Counts for DSP nCounter overlap
+
+```{r}
+
+dsp.samples <- c("SB-18-4726", 
+                 "SB-22-25944",
+                 "SB-22-2963",
+                 "SB-22-696")
+
+contrast.groups.list <- list(
+  "Corrections MOH" = dsp.samples)
+
+
+# Filter data for the chosen annotations
+object <- q3.normalization.output$object
+
+# Generate the counts, annotation, and subset object for lmm
+lmm.input <- subset_for_lmm(object = object, 
+                                subset.list = contrast.groups.list)
+
+# Create summary table of group counts
+summary.table.df <- pData(lmm.input$subset.object) %>%  
+  select(c(names(contrast.groups.list), region, segment))
+
+summary.table <- table(summary.table.df)
+
+print("Sample Numbers per Annotation Group")
+print("-----------------------------------")
+print(summary.table)
+
+# PCA
+
+# Make the PCA table
+pca.dsp.samples <- pca(lmm.input$subset.object@assayData$log_q, 
+                 metadata = lmm.input$annotation, 
+                 removeVar = 0.1)
+
+# Plot the PCA biplots
+dsp.samples.pca <- main_annotation_PCA(pca.table = pca.dsp.samples)
+
+grid.draw(dsp.samples.pca)
+
+# PCA biplot for CD4 count
+pca.plot.sample.name <- biplot(pca.dsp.samples, 
+                       colby = "sample_name", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP-nCounter Samples")
+
+# PCA biplot for CD4 count
+pca.plot.cd4.count <- biplot(pca.dsp.samples, 
+                       colby = "CD4_count", 
+                       legendPosition = "right", 
+                       legendLabSize = 10, 
+                       legendIconSize = 5, 
+                       lab = NULL,
+                       title = NULL, 
+                       subtitle = "DSP-nCounter Samples")
+
+
+
+```
+
+### CIBERSORT
+
+#### Setup
+
+```{r}
+
+# Load the reference file
+# LM22 reference: https://www.ncbi.nlm.nih.gov/pmc/articles/PMC5895181/
+lm22.file.path <- "/Users/cauleyes/Cibersortx/LM22.txt"
+lm22.reference <- read.csv(lm22.file.path, sep = "\t")
+
+# Compare probe set to CIBERSORT reference
+lm22.reference.genes <- lm22.reference$Gene.symbol
+
+#save(lm22.reference.genes, file = #"/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/cibersort/refe#rence_genes.rda")
+
+
+# Load the normalized counts
+norm.counts <- q3.normalization.output$object@assayData$q_norm
+
+# Determine genes missing from the reference in the dsp probe set
+dsp.gene.list <- rownames(norm.counts)
+
+# Map raw dsp genes
+qc.reads <- qc.output$object@assayData$exprs
+qc.read.genes <- rownames(qc.reads)
+
+mapped.raw.gene.df <- bitr(qc.read.genes, 
+                             fromType = "ALIAS", 
+                             toType = "SYMBOL", 
+                             OrgDb = "org.Hs.eg.db")
+
+mapped.raw.gene.list <- mapped.raw.gene.df$SYMBOL
+
+# See the differences between the unmapped raw genes and the lm22 reference
+missing.from.ref.raw.unmapped <- setdiff(qc.read.genes, lm22.reference.genes)
+
+missing.from.dsp.raw.unmapped <- setdiff(lm22.reference.genes, qc.read.genes)
+
+found.in.ref.raw.unmapped <- intersect(qc.read.genes, lm22.reference.genes)
+
+
+# See the differences between the mapped raw genes and the lm22 reference
+missing.from.ref.raw.mapped <- setdiff(mapped.raw.gene.list, lm22.reference.genes)
+
+missing.from.dsp.raw.mapped <- setdiff(lm22.reference.genes, mapped.raw.gene.list)
+
+found.in.ref.raw.mapped <- intersect(mapped.raw.gene.list, lm22.reference.genes)
+
+
+
+# Map filtered dsp genes
+mapped.dsp.gene.df <- bitr(dsp.gene.list, 
+                             fromType = "ALIAS", 
+                             toType = "SYMBOL", 
+                             OrgDb = "org.Hs.eg.db")
+
+mapped.dsp.gene.list <- mapped.dsp.gene.df$SYMBOL
+
+# Compare mapped DSP genes to LM22 reference
+missing.from.ref <- setdiff(mapped.dsp.gene.list, lm22.reference.genes)
+
+missing.from.dsp <- setdiff(lm22.reference.genes, mapped.dsp.gene.list)
+
+found.in.ref <- intersect(mapped.dsp.gene.list, lm22.reference.genes)
+
+# Compare unmapped DSP genes to LM22 reference
+missing.from.ref.unmapped <- setdiff(dsp.gene.list, lm22.reference.genes)
+
+missing.from.dsp.unmapped <- setdiff(lm22.reference.genes, dsp.gene.list)
+
+found.in.ref.unmapped <- intersect(dsp.gene.list, lm22.reference.genes)
+
+
+# Search for individual genes
+goi <- "CENTB1"
+mapped.dsp.gene.list[grep(goi, mapped.dsp.gene.list)]
+
+# Try to map LM22 reference genes
+mapped.lm22.gene.df <- bitr(lm22.reference.genes, 
+                            fromType = "ALIAS", 
+                            toType = "SYMBOL", 
+                            OrgDb = "org.Hs.eg.db")
+
+mapped.lm22.gene.list <- mapped.lm22.gene.df$SYMBOL
+
+#save(lm22.reference.genes, ncounter.gene.list, file = "/rstudio-files/ccbr-data/users/Ned/nCounter_rna/CCBR1245_data_results/cibersort/cibersort_gene_lists.rda")
+  
+missing.from.ref.lm.mapped <- setdiff(mapped.dsp.gene.list, mapped.lm22.gene.list)
+
+missing.from.dsp.lm.mapped <- setdiff(mapped.lm22.gene.list, mapped.dsp.gene.list)
+
+found.in.ref.lm.mapped <- intersect(mapped.dsp.gene.list, mapped.lm22.gene.list)
+
+
+# Genes to map, from Bahman's analysis using geneSynonym
+#mapping.list <- c("EMR1" = "ADGRE1", 
+#                  "FZD3" = "FZD9", 
+#                  "KIR2DL1" = "KIR2DL3", 
+#                  "SIRPG" = "SIRPB2", 
+#                  "TEP1" = "PTEN")
+
+#norm.counts.mapped <- as.data.frame(norm.counts) %>%
+#  mutate(gene = ifelse(gene %in% mapping.list, names(mapping.list)[match(gene, mapping.list)], gene))
+
+# Create a column for gene name
+norm.counts.df <- as.data.frame(norm.counts)
+norm.counts.df$gene <- rownames(norm.counts.df)
+norm.counts.df <- norm.counts.df %>% 
+  relocate(gene, .before = 1)
+
+# Write out input file for cibersort
+write.table(norm.counts.df,
+          paste0("/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/cibersort_dsp/CCBR1245_dsp_ciber_sort_input.tsv"), sep = "\t", row.names = FALSE, quote = FALSE)
+
+
+```
+
+# Spatial Deconvolution
+
+```{r Spatial Deconvolution}
+
+dsp.samples <- c("SB-18-4726", 
+                 "SB-22-25944",
+                 "SB-22-2963",
+                 "SB-22-696")
+
+# Gather the column names to be used in defining contrasts
+contrast.groups.list <- list(
+  "sample_name" = dsp.samples)
+
+# Generate the counts, annotation, and subset object for lmm
+spatial.input <- subset_object_for_lmm(object = object <- q3.normalization.output$object,
+                                       subset.list = contrast.groups.list)
+
+# Get the reference sets
+human.skin.ref <- download_profile_matrix(species = "Human",
+                                       age_group = "Adult", 
+                                       matrixname = "Skin_HCA")
+
+
+human.immune.ref <- download_profile_matrix(species = "Human",
+                                       age_group = "Adult", 
+                                       matrixname = "ImmuneCensus_HCA")
+
+
+# Derive the probe set background
+q3.normalized.reads <- spatial.input$subset.object@assayData$q_norm
+feature.data <- fData(spatial.input$subset.object)
+
+probe.background <- derive_GeoMx_background(norm = q3.normalized.reads,
+                                            probepool = feature.data$Module,
+                                            negnames = c("NegProbe-WTX"))
+
+# Combine common cell types
+skin.combine.types <- list(
+  Macrophages = c("Macrophages.DC.1", 
+                  "Macrophages.DC.2", 
+                  "Macrophages.DC.3"), 
+  Melanocytes = c("Melanocytes.1", 
+                  "Melanocytes.2"), 
+  Pericytes = c("Pericytes.1", 
+                  "Pericytes.2"), 
+  Keratinocytes = c("Keratinocytes.1", 
+                  "Keratinocytes.2"), 
+  T.cells = c("T.cells"), 
+  Secretory.reticular.Fibroblast = c("Secretory.reticular.Fibroblast"), 
+  Pro.inflammatory.Fibroblast = c("Pro.inflammatory.Fibroblast"), 
+  Secretory.papillary.Fibroblast = c("Secretory.papillary.Fibroblast"), 
+  Mesenchymal.Fibroblast = c("Mesenchymal.Fibroblast"), 
+  Vascular.EC = c("Vascular.EC"), 
+  Lymphatic.EC = c("Lymphatic.EC"), 
+  Erythrocytes = c("Erythrocytes")
+)
+
+immune.combine.types <- list(
+  CD14.monocyte = c("CD14+.monocyte.type.1", 
+                  "CD14+.monocyte.type.2"), 
+  erythoid = c("erythroid.cell.type.1", 
+               "erythroid.cell.type.2"), 
+  cytotoxic.T.cell = c("cytotoxic.T.cell.type.1", 
+                "cytotoxic.T.cell.type.2"), 
+  naive.B.cell = c("naive.B.cell"), 
+  precursor.B.cell = c("precursor.B.cell"), 
+  pro.B.cell = c("pro.B.cell"), 
+  natural.killer.cell = c("natural.killer.cell"), 
+  CD4.naive.T.cell = c("CD4+.naive.T.cell"), 
+  conventional.dendritic.cell = c("conventional.dendritic.cell"), 
+  T.helper.cell = c("T.helper.cell"), 
+  naive.CD8.T.cell = c("naive.CD8+.T.cell"), 
+  megakaryocyte = c("megakaryocyte"), 
+  memory.B.cell = c("memory.B.cell"), 
+  plasma.cell = c("plasma.cell"), 
+  plasmacytoid.dendritic.cell = c("plasmacytoid.dendritic.cell"), 
+  CD16.monocyte = c("CD16+.monocyte"), 
+  hematopoietic.stem.cell = c("hematopoietic.stem.cell"), 
+  mesenchymal.stem.cell = c("mesenchymal.stem.cell")
+)
+
+
+# Run spatial decon for each reference set
+spatial.decon.skin = runspatialdecon(object = spatial.input$subset.object,
+                      norm_elt = "q_norm",
+                      raw_elt = "exprs",
+                      X = human.skin.ref,
+                      align_genes = TRUE, 
+                      cellmerges = skin.combine.types)
+
+spatial.decon.immune = runspatialdecon(object = spatial.input$subset.object,
+                      norm_elt = "q_norm",
+                      raw_elt = "exprs",
+                      X = human.immune.ref,
+                      align_genes = TRUE, 
+                      cellmerges = immune.combine.types)
+
+```
+
+#### Heatmaps
+
+```{r}
+
+anno.colors = list(
+      region = c(tumor = "pink",
+                 vessel = "seagreen1", 
+                 immune = "steelblue1", 
+                 'immune/stroma' = "maroon"), 
+      segment = c(full_ROI = "darkgoldenrod2", 
+                  LANA_pos = "slateblue")
+      )
+
+# Subset the annotation just for the heatmap annotations of interest
+spatial.annotation <- spatial.input$annotation %>% 
+  select(c(names(anno.colors), segmentID))
+
+# Generate a mapping df for AOI IDs
+spatial.annotation$sample_ID <- rownames(spatial.annotation)
+ID.mapping <- spatial.annotation %>% 
+  select(sample_ID, segmentID)
+
+# Change the annotation row names
+rownames(spatial.annotation) <- spatial.annotation$segmentID
+spatial.annotation <- spatial.annotation %>% 
+  select(names(anno.colors))
+
+# Gather the scores for each cell type with each ref set
+skin.cell.scores <- as.data.frame(spatial.decon.skin$beta)
+immune.cell.scores <- as.data.frame(spatial.decon.immune$beta)
+
+# Add a column for mapping to AOI ID
+skin.cell.scores$sample_ID <- rownames(skin.cell.scores)
+immune.cell.scores$sample_ID <- rownames(immune.cell.scores)
+
+# Map the AOI ID
+skin.cell.scores <- merge(skin.cell.scores, ID.mapping, by = "sample_ID")
+immune.cell.scores <- merge(immune.cell.scores, ID.mapping, by = "sample_ID")
+
+# Replace the rownames and remove extra ID columns
+rownames(skin.cell.scores) <- skin.cell.scores$segmentID
+skin.cell.scores <- skin.cell.scores %>% 
+  select(-segmentID, -sample_ID)
+rownames(immune.cell.scores) <- immune.cell.scores$segmentID
+immune.cell.scores <- immune.cell.scores %>% 
+  select(-segmentID, -sample_ID)
+
+# Transform for combining with annotation
+skin.cell.scores <- as.data.frame(t(skin.cell.scores))
+immune.cell.scores <- as.data.frame(t(immune.cell.scores))
+
+# Check for cell types with all zeros and remove
+row.sums <- rowSums(skin.cell.scores)
+zero.sum.skin <- rownames(skin.cell.scores[row.sums == 0, ])
+skin.cell.scores.cleaned <- skin.cell.scores[!rownames(skin.cell.scores) %in% zero.sum.skin, ]
+
+row.sums <- rowSums(immune.cell.scores)
+zero.sum.immune <- rownames(immune.cell.scores[row.sums == 0, ])
+immune.cell.scores.cleaned <- immune.cell.scores[!rownames(immune.cell.scores) %in% zero.sum.immune, ]
+
+
+# Make heatmaps
+skin.heatmap <- make_heatmap(normalized.log.counts.df = skin.cell.scores.cleaned,
+                         annotation.column = spatial.annotation, 
+                         anno.colors = anno.colors, 
+                         cluster.rows = TRUE, 
+                         cluster.columns = TRUE, 
+                         main.title = "Spatial Decon Skin Reference", 
+                         show.rownames = TRUE)
+
+
+immune.heatmap <- make_heatmap(normalized.log.counts.df = immune.cell.scores.cleaned,
+                         annotation.column = spatial.annotation, 
+                         anno.colors = anno.colors, 
+                         cluster.rows = TRUE, 
+                         cluster.columns = TRUE, 
+                         main.title = "Spatial Decon Immune Reference", 
+                         show.rownames = TRUE)
+
+```
+
+#### Proportion Bar Plots
+
+```{r}
+
+# Calculate the percentage for each cell type in each AOI
+skin.cell.perc <- sweep(skin.cell.scores.cleaned, 
+                               2, 
+                               colSums(skin.cell.scores.cleaned), 
+                               FUN = "/") * 100
+
+immune.cell.perc <- sweep(immune.cell.scores.cleaned, 
+                               2, 
+                               colSums(immune.cell.scores.cleaned), 
+                               FUN = "/") * 100
+
+# Transform for combining with annotation
+skin.cell.perc.transform <- as.data.frame(t(skin.cell.perc))
+skin.cell.perc.transform$segmentID <- rownames(skin.cell.perc.transform)
+
+immune.cell.perc.transform <- as.data.frame(t(immune.cell.perc))
+immune.cell.perc.transform$segmentID <- rownames(immune.cell.perc.transform)
+
+# Add column for mapping to annotation
+spatial.annotation$segmentID <- rownames(spatial.annotation)
+
+# Combine the cell type percentage and annotation and melt for use in ggplot
+skin.cell.combine <- merge(skin.cell.perc.transform, spatial.annotation,
+                           by = "segmentID")
+skin.cell.melt <- melt(skin.cell.combine, 
+                       id.vars = c("segmentID", 
+                                   "region", 
+                                   "segment"), 
+                       variable.name = "cell.type"
+                       )
+
+immune.cell.combine <- merge(immune.cell.perc.transform, spatial.annotation,
+                           by = "segmentID")
+immune.cell.melt <- melt(immune.cell.combine, 
+                       id.vars = c("segmentID", 
+                                   "region", 
+                                   "segment"), 
+                       variable.name = "cell.type"
+                       )
+
+# Make the bar plots
+skin.bar.plot <- ggplot(data = skin.cell.melt, aes(x = segmentID, 
+                                                   y = value, 
+                                                   fill = cell.type)) + 
+  geom_bar(stat = "identity", color = "black") + 
+  facet_wrap(~region, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  )
+  
+immune.bar.plot <- ggplot(data = immune.cell.melt, aes(x = segmentID, 
+                                                   y = value, 
+                                                   fill = cell.type)) + 
+  geom_bar(stat = "identity", color = "black") + 
+  facet_wrap(~region, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  )
+```
+
+#### Boxplots Region
+
+```{r}
+
+tumor.vessel.comparison <- list(
+  c("tumor", "vessel"))
+
+immune.other.comparison <- list(
+  c("tumor", "immune"), 
+  c("vessel", "immune"))
+
+skin.box.plot <- ggplot(data = skin.cell.melt, aes(x = region, 
+                                                   y = value, 
+                                                   fill = segment)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y = "Percentage of Total") + 
+  stat_compare_means(comparisons = tumor.vessel.comparison, 
+                     label = "p.signif", 
+                     label.y = 20) + 
+  stat_compare_means(comparisons = immune.other.comparison, 
+                     label = "p.signif", 
+                     label.y = 30)
+
+immune.box.plot <- ggplot(data = immune.cell.melt, aes(x = region, 
+                                                   y = value, 
+                                                   fill = segment)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y = "Percentage of Total") + 
+  stat_compare_means(comparisons = tumor.vessel.comparison, 
+                     label = "p.signif", 
+                     label.y = 20) + 
+  stat_compare_means(comparisons = immune.other.comparison, 
+                     label = "p.signif", 
+                     label.y = 30)
+
+
+# LANA+ versus Vessel
+
+# Subset for only LANA+ and Vessel
+skin.cell.melt.LANA <- skin.cell.melt %>% 
+  filter(segment == "LANA_pos")
+
+skin.cell.melt.vessel <- skin.cell.melt %>% 
+  filter(region == "vessel")
+
+skin.cell.melt.LV <- rbind(skin.cell.melt.LANA, skin.cell.melt.vessel)
+
+
+immune.cell.melt.LANA <- immune.cell.melt %>% 
+  filter(segment == "LANA_pos")
+
+immune.cell.melt.vessel <- immune.cell.melt %>% 
+  filter(region == "vessel")
+
+immune.cell.melt.LV <- rbind(immune.cell.melt.LANA, immune.cell.melt.vessel)
+
+# Make the boxplots
+
+skin.box.plot.LV <- ggplot(data = skin.cell.melt.LV, aes(x = region, 
+                                                   y = value, 
+                                                   fill = segment)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y = "Percentage of Total") + 
+  stat_compare_means(comparisons = tumor.vessel.comparison, 
+                     label = "p.signif", 
+                     label.y = 20)
+
+immune.box.plot.LV <- ggplot(data = immune.cell.melt.LV, aes(x = region, 
+                                                   y = value, 
+                                                   fill = segment)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y = "Percentage of Total") + 
+  stat_compare_means(comparisons = tumor.vessel.comparison, 
+                     label = "p.signif", 
+                     label.y = 20)
+
+```
