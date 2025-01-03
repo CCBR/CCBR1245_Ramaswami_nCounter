@@ -1,0 +1,173 @@
+---
+title: "Rosalind Deconvolution Results"
+format: html
+editor: visual
+---
+
+## 
+
+```{r Load Libraries}
+
+library(ggplot2)
+library(ggpubr)
+library(readxl)
+library(dplyr)
+library(reshape2)
+
+```
+
+```{r Load Data}
+
+# Load the deconvolution data
+project.folder <- "/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/"
+results.folder <- "/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/Results/December2024/nCounter/Rosalind/"
+data.folder <- "/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/Results/December2024/nCounter/Rosalind/cell_type_decon/"
+
+decon.data <- read.csv(paste0(data.folder, "Rosalind_Deconvolution_Results_master.csv"))
+
+# Load the annotation
+annotation.df <- as.data.frame(read_excel(paste0(project.folder, "5_2_24_ncounter_rna_annotation_edit_NC.xlsx")))
+```
+
+### Format Data
+
+```{r}
+
+# Make the sample names rows and cell types as columns
+decon.data.transform <- as.data.frame(t(decon.data))
+
+# Fix the column names using the first row of cell types
+cell.types <- unlist(as.vector(decon.data.transform[1,]))
+colnames(decon.data.transform) <- cell.types
+
+# Remove the cell type row
+decon.data.cleaned <- decon.data.transform[2:nrow(decon.data.transform),]
+
+# Create a column for the sample name
+decon.data.cleaned$'Sample Name' <- rownames(decon.data.cleaned)
+
+# Subset the annotation for fields of interest
+fields.of.interest <- c("Sample Name", "KS_alone", "Diagnosis", "CD4_count_200")
+annotation.subset <- annotation.df %>% 
+  select(all_of(fields.of.interest))
+
+# Combine the abundance data with the annotation
+decon.annotation.combined <- merge(decon.data.cleaned, annotation.subset, by = 'Sample Name')
+
+# Format the abudance scores and annotation for plotting
+decon.annotation.combined <- decon.annotation.combined %>% select(-'Sample Name')
+
+decon.annotaton.melt <- melt(decon.annotation.combined, 
+                             id.vars = c("KS_alone", 
+                                         "Diagnosis", 
+                                         "CD4_count_200"), 
+                             value.name = "abundance.score", 
+                             variable.name = "cell.type")
+
+decon.annotaton.melt$abundance.score <- as.numeric(decon.annotaton.melt$abundance.score)
+
+
+```
+
+### Create Boxplots
+
+```{r}
+
+KS.alone.comparison <- list(
+  c("N", "Y"))
+
+diagnosis.KICS.comparison <- list(
+  c("KS", "KS, KICS"))
+
+diagnosis.MCD.comparison <- list(
+  c("KS", "KS, MCD"))
+
+diagnosis.PEL.comparison <- list(
+  c("KS", "KS, PEL"))
+
+diagnosis.MCD.PEL.comparison <- list(
+  c("KS", "KS, MCD, PEL"))
+
+CD4count.comparison <- list(
+  c("High", "Low"))
+
+KS.alone.box.plot <- ggplot(data = decon.annotaton.melt, aes(x = KS_alone, 
+                                                             y = abundance.score, 
+                                                             fill = KS_alone)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        panel.grid.major.x = element_blank()) + 
+  labs(y = "Log2 Abundance Score", 
+       x = NULL) + 
+  stat_compare_means(comparisons = KS.alone.comparison, 
+                     label = "p.signif", 
+                     label.y = 10)
+
+diagnosis.box.plot <- ggplot(data = decon.annotaton.melt, aes(x = Diagnosis, 
+                                                             y = abundance.score, 
+                                                             fill = Diagnosis)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        panel.grid.major.x = element_blank()) + 
+  labs(y = "Log2 Abundance Score", 
+       x = NULL) + 
+  stat_compare_means(comparisons = diagnosis.KICS.comparison, 
+                     label = "p.signif", 
+                     label.y = 14, 
+                     hide.ns = TRUE, 
+                     vjust = 0.5) + 
+  stat_compare_means(comparisons = diagnosis.MCD.comparison, 
+                     label = "p.signif", 
+                     label.y = 12, 
+                     hide.ns = TRUE, 
+                     vjust = 0.5) + 
+  stat_compare_means(comparisons = diagnosis.PEL.comparison, 
+                     label = "p.signif", 
+                     label.y = 16, 
+                     hide.ns = TRUE, 
+                     vjust = 0.5) + 
+  stat_compare_means(comparisons = diagnosis.MCD.PEL.comparison, 
+                     label = "p.signif", 
+                     label.y = 18, 
+                     hide.ns = TRUE, 
+                     vjust = 0.5)
+
+CD4.count.box.plot <- ggplot(data = decon.annotaton.melt, aes(x = CD4_count_200, 
+                                                             y = abundance.score, 
+                                                             fill = CD4_count_200)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), 
+        panel.grid.major.x = element_blank()) + 
+  labs(y = "Log2 Abundance Score", 
+       x = NULL) + 
+  stat_compare_means(comparisons = CD4count.comparison, 
+                     label = "p.signif", 
+                     label.y = 10)
+
+# Export Boxplots
+export.decon.boxplots <- TRUE
+if(export.decon.boxplots == TRUE){
+  
+  ggsave(paste0(results.folder, 
+                "cell_type_decon/spatial_decon_ks_alone_boxplot.png"), 
+         KS.alone.box.plot, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder,  
+                "cell_type_decon/spatial_decon_diagnosis_boxplot.png"), 
+         diagnosis.box.plot, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder,  
+                "cell_type_decon/spatial_decon_cd4_count_boxplot.png"), 
+         CD4.count.box.plot, 
+         height = 10, 
+         width = 14)
+
+}
+```
