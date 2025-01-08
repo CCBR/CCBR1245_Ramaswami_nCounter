@@ -1,7 +1,7 @@
 ---
 title: "CCBR1245 Ramaswami: Analysis of nCounter and DSP Overlapping Samples"
 output: html_document
-date: "2025-July-15"
+date: "2025-January-8"
 ---
 # Setup
 
@@ -55,8 +55,8 @@ source("/Users/cauleyes/CPTR/DSP_Analysis/DSP_functions.R")
 
 # Results folder where the results should be exported
 data.folder <- "/Users/cauleyes/CPTR/CPTR-5_Krug_Ramaswami/CPTR_5_DSP_Krug/"
-results.folder <- "/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/Results/November2024/"
-run.folder <- "DSP/11_15_24/"
+results.folder <- "/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/Results/January2024/"
+run.folder <- "DSP/"
 
 ```
 
@@ -634,7 +634,7 @@ contrast.groups.list <- list(
   "Corrections MOH" = dsp.samples)
 
 # Generate the counts, annotation, and subset object for lmm
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Load the normalized counts
@@ -843,8 +843,8 @@ if(global.export.de == TRUE){
 # Make the volcano plot
 volcano.output <- make_volcano(lmm.results = results.df, 
                                title = contrast.name, 
-                               legend.title = "DSP Samples, Tumor AOIs", 
-                               x.axis.title = "High vs. Low")
+                               legend.title = "Expression, Tumor AOIs", 
+                               x.axis.title = "log FC")
 
 # Export the volcano
 if(global.export.de == TRUE){ 
@@ -1004,7 +1004,7 @@ contrast.groups.list <- list(
 object <- q3.normalization.output$object
 
 # Generate the counts, annotation, and subset object for lmm
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Create summary table of group counts
@@ -1057,29 +1057,40 @@ if(global.export.de == TRUE){
 
 # Make the volcano plot
 volcano.output <- make_volcano(lmm.results = results.df, 
-                               title = contrast.name, 
-                               legend.title = "DSP Samples, LANA+ AOIs", 
-                               x.axis.title = "High vs. Low", 
-                               fc.limit = 1)
+                               title = "LANA+ AOIs High vs. Low CD4 Count", 
+                               legend.title = "Expression, High CD4 Count AOIs", 
+                               x.axis.title = "log FC", 
+                               fc.limit = 1, 
+                               custom.gene.labels = NULL)
 
 custom.volcano.output <- make_volcano(lmm.results = results.df, 
-                               title = "LANA+ AOIs High vs. Low CD4 Count", 
-                               legend.title = "High CD4 Count AOI Expression", 
-                               x.axis.title = "High vs. Low CD4 Count", 
-                               custom.gene.labels <- c("STC1", 
-                                                       "MKI67", 
-                                                       "LYVE1", 
-                                                       "TSPAN15", 
-                                                       "ICAM1", 
-                                                       "UNC5B", 
-                                                       "CYB5RL", 
-                                                       "PDGFRB", 
-                                                       "NOTCH3"), 
-                               fc.limit = 1)
+                                      title = "LANA+ AOIs High vs. Low CD4 Count", 
+                                      legend.title = "Expression, High CD4 Count AOIs", 
+                                      x.axis.title = "log FC", 
+                                      custom.gene.labels = c("STC1", 
+                                                              "MKI67", 
+                                                              "LYVE1", 
+                                                              "TSPAN15", 
+                                                              "ICAM1", 
+                                                              "UNC5B", 
+                                                              "CYB5RL", 
+                                                              "PDGFRB", 
+                                                              "NOTCH3"), 
+                                      fc.limit = 1)
 
 # Export the volcano
 if(global.export.de == TRUE){ 
-  ggsave(filename = paste0(results.folder, run.folder, contrast.name, "_volcano_plot.png"), 
+  ggsave(volcano.output$volcano.plot, 
+         filename = paste0(results.folder, 
+                           run.folder, 
+                           "LANA_AOIs_CD4_comparison_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+  ggsave(custom.volcano.output$volcano.plot, 
+         filename = paste0(results.folder, 
+                           run.folder, 
+                           "LANA_AOIs_CD4_comparison_volcano_plot_custom.png"), 
          width = 14, 
          height = 10)
 }
@@ -1117,11 +1128,11 @@ if(global.export.de == TRUE){
 }
 
 # Subset annotation
-annotation.subset <- cleaned.annotation.df %>% 
+annotation.subset <- lmm.input$annotation %>% 
   filter(segment %in% c("LANA_pos"))
 
 # Subset counts
-log.counts.subset <- log.counts.cleaned %>% 
+log.counts.subset <- as.data.frame(lmm.input$log.counts) %>% 
   select(rownames(annotation.subset))
 
 
@@ -1129,11 +1140,6 @@ log.counts.subset <- log.counts.cleaned %>%
 pca.table <- pca(log.counts.subset, 
                  metadata = annotation.subset, 
                  removeVar = 0.1)
-
-# Plot the PCA biplots
-main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
-
-grid.draw(main.annotation.pca)
 
 # PCA biplot for CD4 count
 pca.plot.cd4.count <- biplot(pca.table, 
@@ -1143,7 +1149,7 @@ pca.plot.cd4.count <- biplot(pca.table,
                        legendIconSize = 5, 
                        lab = NULL,
                        title = NULL, 
-                       subtitle = "DSP/nCounter Samples LANA AOIs")
+                       subtitle = "DSP Counter Samples LANA AOIs")
 
 print(pca.plot.cd4.count)
 
@@ -1295,7 +1301,7 @@ contrast.groups.list <- list(
 object <- q3.normalization.output$object
 
 # Generate the counts, annotation, and subset object for lmm
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Create summary table of group counts
@@ -1349,8 +1355,8 @@ if(global.export.de == TRUE){
 # Make the volcano plot
 volcano.output <- make_volcano(lmm.results = results.df, 
                                title = contrast.name, 
-                               legend.title = "DSP Samples, full ROI AOIs", 
-                               x.axis.title = "High vs. Low")
+                               legend.title = "Expression, High CD4 Count", 
+                               x.axis.title = "log FC")
 
 # Export the volcano
 if(global.export.de == TRUE){ 
@@ -1392,11 +1398,11 @@ if(global.export.de == TRUE){
 }
 
 # Subset annotation
-annotation.subset <- cleaned.annotation.df %>% 
+annotation.subset <- lmm.input$annotation %>% 
   filter(segment %in% c("full_ROI"))
 
 # Subset counts
-log.counts.subset <- log.counts.cleaned %>% 
+log.counts.subset <- lmm.input$log.counts %>% 
   select(rownames(annotation.subset))
 
 
@@ -1406,9 +1412,9 @@ pca.table <- pca(log.counts.subset,
                  removeVar = 0.1)
 
 # Plot the PCA biplots
-main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
+#main.annotation.pca <- main_annotation_PCA(pca.table = pca.table)
 
-grid.draw(main.annotation.pca)
+#grid.draw(main.annotation.pca)
 
 # PCA biplot for CD4 count
 pca.plot.cd4.count <- biplot(pca.table, 
@@ -1418,7 +1424,7 @@ pca.plot.cd4.count <- biplot(pca.table,
                        legendIconSize = 5, 
                        lab = NULL,
                        title = NULL, 
-                       subtitle = "DSP/nCounter Samples full ROI AOIs")
+                       subtitle = "DSP Counter Samples full ROI AOIs")
 
 print(pca.plot.cd4.count)
 
@@ -1511,7 +1517,7 @@ contrast.groups.list <- list(
 object <- q3.normalization.output$object
 
 # Generate the counts, annotation, and subset object for lmm
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Create summary table of group counts
@@ -1565,8 +1571,8 @@ if(global.export.de == TRUE){
 # Make the volcano plot
 volcano.output <- make_volcano(lmm.results = results.df, 
                                title = contrast.name, 
-                               legend.title = "DSP Samples, all AOIs", 
-                               x.axis.title = "Tumor vs. Vessel")
+                               legend.title = "Expression, Tumor AOIs", 
+                               x.axis.title = "log FC")
 
 # Export the volcano
 if(global.export.de == TRUE){ 
@@ -1653,7 +1659,7 @@ contrast.groups.list <- list(
 object <- q3.normalization.output$object
 
 # Generate the counts, annotation, and subset object for lmm
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Create summary table of group counts
@@ -1707,8 +1713,8 @@ if(global.export.de == TRUE){
 # Make the volcano plot
 volcano.output <- make_volcano(lmm.results = results.df, 
                                title = contrast.name, 
-                               legend.title = "DSP Samples, all AOIs", 
-                               x.axis.title = "full ROI vs LANA +")
+                               legend.title = "Expression, Full ROI", 
+                               x.axis.title = "log FC")
 
 # Export the volcano
 if(global.export.de == TRUE){ 
@@ -1798,7 +1804,7 @@ contrast.groups.list <- list(
   "segment" = "LANA_pos")
 
 # Subset for LANA+
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Get the AOIs for LANA+
@@ -1810,7 +1816,7 @@ contrast.groups.list <- list(
   "region" = "vessel")
 
 # Subset for Vessel
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Get the AOIs for LANA+
@@ -1824,7 +1830,7 @@ contrast.groups.list <- list(
   "Corrections MOH" = dsp.samples, 
   "aoi_ID" = lana.vessel.aois)
 
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 
@@ -1873,15 +1879,16 @@ if(global.export.de == TRUE){
 
 # Make the volcano plot
 volcano.output <- make_volcano(lmm.results = results.df, 
-                               title = contrast.name, 
-                               legend.title = "LANA+ AOI Expression", 
-                               x.axis.title = "LANA + vs. Vessel")
+                               title = "LANA+ vs. Vessel", 
+                               legend.title = "Expression, LANA+ AOIs", 
+                               x.axis.title = "log FC", 
+                               custom.gene.labels = NULL)
 
 custom.volcano.output <- make_volcano(lmm.results = results.df, 
-                               title = contrast.name, 
+                               title = "LANA+ vs. Vessel", 
                                legend.title = "LANA+ AOI Expression", 
                                x.axis.title = "LANA + vs. Vessel", 
-                               custom.gene.labels <- c("STC1", 
+                               custom.gene.labels = c("STC1", 
                                                        "MKI67", 
                                                        "LYVE1", 
                                                        "TSPAN15", 
@@ -1896,8 +1903,14 @@ if(global.export.de == TRUE){
   ggsave(volcano.output$volcano.plot, 
          filename = paste0(results.folder, 
                            run.folder, 
-                           contrast.name, 
-                           "_volcano_plot.png"), 
+                           "LANA_v_Vessel_volcano_plot.png"), 
+         width = 14, 
+         height = 10)
+  
+  ggsave(custom.volcano.output$volcano.plot, 
+         filename = paste0(results.folder, 
+                           run.folder, 
+                           "LANA_v_Vessel_volcano_plot_custom.png"), 
          width = 14, 
          height = 10)
 }
@@ -2050,7 +2063,7 @@ contrast.groups.list <- list(
   "segment" = "LANA_pos")
 
 # Subset for LANA+
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Get the AOIs for LANA+
@@ -2062,7 +2075,7 @@ contrast.groups.list <- list(
   "region" = "vessel")
 
 # Subset for Vessel
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Get the AOIs for vessels 
@@ -2074,7 +2087,7 @@ contrast.groups.list <- list(
   "region" = "immune")
 
 # Subset for Vessel
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Get the AOIs for immune 
@@ -2088,7 +2101,7 @@ contrast.groups.list <- list(
   "Corrections MOH" = dsp.samples, 
   "aoi_ID" = lana.vessel.immune.aois)
 
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 
@@ -2137,15 +2150,16 @@ if(global.export.de == TRUE){
 
 # Make the volcano plot
 volcano.output <- make_volcano(lmm.results = results.df, 
-                               title = contrast.name, 
-                               legend.title = "DSP nCounter Samples", 
-                               x.axis.title = "LANA + vs. Vessel")
+                               title = "LANA+ AOIs vs. Vessel and Immune AOIs", 
+                               legend.title = "Expression, LANA+ AOIs", 
+                               x.axis.title = "log FC", 
+                               custom.gene.labels = NULL)
 
 custom.volcano.output <- make_volcano(lmm.results = results.df, 
-                               title = "LANA+ AOIs vs. LANA- Vessel and Immune AOIs",
+                               title = "LANA+ AOIs vs. Vessel and Immune AOIs",
                                fc.limit = 1, 
-                               legend.title = "LANA+ AOI Expression", 
-                               x.axis.title = "LANA + vs. Vessel and Immune", 
+                               legend.title = "Expression, LANA+ AOIs", 
+                               x.axis.title = "log FC", 
                                custom.gene.labels <- c("STC1", 
                                                        "MKI67", 
                                                        "LYVE1", 
@@ -2161,10 +2175,17 @@ if(global.export.de == TRUE){
   ggsave(volcano.output$volcano.plot, 
          filename = paste0(results.folder, 
                            run.folder, 
-                           contrast.name, 
-                           "_volcano_plot.png"), 
+                           "LANA_v_VesselImmune_volcano_plot.png"), 
          width = 14, 
          height = 10)
+  
+  ggsave(custom.volcano.output$volcano.plot, 
+         filename = paste0(results.folder, 
+                           run.folder, 
+                           "LANA_v_VesselImmune_volcano_plot_custom.png"), 
+         width = 14, 
+         height = 10)
+  
 }
 
 print(volcano.output$volcano.plot)
@@ -2311,7 +2332,7 @@ contrast.groups.list <- list(
 object <- q3.normalization.output$object
 
 # Generate the counts, annotation, and subset object for lmm
-lmm.input <- subset_for_lmm(object = object, 
+lmm.input <- subset_object_for_lmm(object = object, 
                                 subset.list = contrast.groups.list)
 
 # Create summary table of group counts
@@ -2491,9 +2512,19 @@ dsp.samples <- c("SB-18-4726",
 contrast.groups.list <- list(
   "sample_name" = dsp.samples)
 
+# Create the AOI_ID
+pData(q3.normalization.output$object)$AOI_ID <- paste0(substr(pData(q3.normalization.output$object)$Tumor, 
+    1, segment.id.length), "|", substr(pData(q3.normalization.output$object)$Source, 
+    1, segment.id.length), "|", substr(pData(q3.normalization.output$object)$region, 
+    1, segment.id.length), "|", substr(pData(q3.normalization.output$object)$segment, 
+    1, segment.id.length), "|", substr(gsub("slide_", "", pData(q3.normalization.output$object)$slide_name), 
+    1, segment.id.length), "|", sData(q3.normalization.output$object)$roi)
+
 # Generate the counts, annotation, and subset object for lmm
 spatial.input <- subset_object_for_lmm(object = object <- q3.normalization.output$object,
                                        subset.list = contrast.groups.list)
+
+object <- spatial.input$subset.object
 
 # Get the reference sets
 human.skin.ref <- download_profile_matrix(species = "Human",
@@ -2505,10 +2536,16 @@ human.immune.ref <- download_profile_matrix(species = "Human",
                                        age_group = "Adult", 
                                        matrixname = "ImmuneCensus_HCA")
 
+# Bahman ref loaded as GSE130973_skin
+#load("/Users/cauleyes/CCBR/CCBR-1245_Ramaswami/spatial_decon/Biowulf_GSE130973_skin_2nd_3rd_SCT_transforme#d_method_as_references_with_new_GENEID.Robj")
+
+#bahman.ref <- GSE130973_skin[["RNA"]]$counts
+
+#GSE130973_skin@assays
 
 # Derive the probe set background
-q3.normalized.reads <- spatial.input$subset.object@assayData$q_norm
-feature.data <- fData(spatial.input$subset.object)
+q3.normalized.reads <- object@assayData$q_norm
+feature.data <- fData(object)
 
 probe.background <- derive_GeoMx_background(norm = q3.normalized.reads,
                                             probepool = feature.data$Module,
@@ -2561,14 +2598,14 @@ immune.combine.types <- list(
 
 
 # Run spatial decon for each reference set
-spatial.decon.skin = runspatialdecon(object = spatial.input$subset.object,
+spatial.decon.skin = runspatialdecon(object = object,
                       norm_elt = "q_norm",
                       raw_elt = "exprs",
                       X = human.skin.ref,
                       align_genes = TRUE, 
                       cellmerges = skin.combine.types)
 
-spatial.decon.immune = runspatialdecon(object = spatial.input$subset.object,
+spatial.decon.immune = runspatialdecon(object = object,
                       norm_elt = "q_norm",
                       raw_elt = "exprs",
                       X = human.immune.ref,
@@ -2592,15 +2629,15 @@ anno.colors = list(
 
 # Subset the annotation just for the heatmap annotations of interest
 spatial.annotation <- spatial.input$annotation %>% 
-  select(c(names(anno.colors), segmentID))
+  select(c(names(anno.colors), AOI_ID))
 
 # Generate a mapping df for AOI IDs
 spatial.annotation$sample_ID <- rownames(spatial.annotation)
 ID.mapping <- spatial.annotation %>% 
-  select(sample_ID, segmentID)
+  select(sample_ID, AOI_ID)
 
 # Change the annotation row names
-rownames(spatial.annotation) <- spatial.annotation$segmentID
+rownames(spatial.annotation) <- spatial.annotation$AOI_ID
 spatial.annotation <- spatial.annotation %>% 
   select(names(anno.colors))
 
@@ -2617,12 +2654,12 @@ skin.cell.scores <- merge(skin.cell.scores, ID.mapping, by = "sample_ID")
 immune.cell.scores <- merge(immune.cell.scores, ID.mapping, by = "sample_ID")
 
 # Replace the rownames and remove extra ID columns
-rownames(skin.cell.scores) <- skin.cell.scores$segmentID
+rownames(skin.cell.scores) <- skin.cell.scores$AOI_ID
 skin.cell.scores <- skin.cell.scores %>% 
-  select(-segmentID, -sample_ID)
-rownames(immune.cell.scores) <- immune.cell.scores$segmentID
+  select(-AOI_ID, -sample_ID)
+rownames(immune.cell.scores) <- immune.cell.scores$AOI_ID
 immune.cell.scores <- immune.cell.scores %>% 
-  select(-segmentID, -sample_ID)
+  select(-AOI_ID, -sample_ID)
 
 # Transform for combining with annotation
 skin.cell.scores <- as.data.frame(t(skin.cell.scores))
@@ -2656,6 +2693,28 @@ immune.heatmap <- make_heatmap(normalized.log.counts.df = immune.cell.scores.cle
                          main.title = "Spatial Decon Immune Reference", 
                          show.rownames = TRUE)
 
+# Export Heatmaps
+global.export.decon <- TRUE
+export.decon.heatmaps <- global.export.decon
+if(export.decon.heatmaps == TRUE){
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_skin_ref_heatmap.png"), 
+         skin.heatmap, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_immune_ref_heatmap.png"), 
+         immune.heatmap, 
+         height = 10, 
+         width = 14)
+  
+}
+
+
 ```
 
 #### Proportion Bar Plots
@@ -2675,35 +2734,35 @@ immune.cell.perc <- sweep(immune.cell.scores.cleaned,
 
 # Transform for combining with annotation
 skin.cell.perc.transform <- as.data.frame(t(skin.cell.perc))
-skin.cell.perc.transform$segmentID <- rownames(skin.cell.perc.transform)
+skin.cell.perc.transform$AOI_ID <- rownames(skin.cell.perc.transform)
 
 immune.cell.perc.transform <- as.data.frame(t(immune.cell.perc))
-immune.cell.perc.transform$segmentID <- rownames(immune.cell.perc.transform)
+immune.cell.perc.transform$AOI_ID <- rownames(immune.cell.perc.transform)
 
 # Add column for mapping to annotation
-spatial.annotation$segmentID <- rownames(spatial.annotation)
+spatial.annotation$AOI_ID <- rownames(spatial.annotation)
 
 # Combine the cell type percentage and annotation and melt for use in ggplot
 skin.cell.combine <- merge(skin.cell.perc.transform, spatial.annotation,
-                           by = "segmentID")
+                           by = "AOI_ID")
 skin.cell.melt <- melt(skin.cell.combine, 
-                       id.vars = c("segmentID", 
+                       id.vars = c("AOI_ID", 
                                    "region", 
                                    "segment"), 
                        variable.name = "cell.type"
                        )
 
 immune.cell.combine <- merge(immune.cell.perc.transform, spatial.annotation,
-                           by = "segmentID")
+                           by = "AOI_ID")
 immune.cell.melt <- melt(immune.cell.combine, 
-                       id.vars = c("segmentID", 
+                       id.vars = c("AOI_ID", 
                                    "region", 
                                    "segment"), 
                        variable.name = "cell.type"
                        )
 
 # Make the bar plots
-skin.bar.plot <- ggplot(data = skin.cell.melt, aes(x = segmentID, 
+skin.bar.plot <- ggplot(data = skin.cell.melt, aes(x = AOI_ID, 
                                                    y = value, 
                                                    fill = cell.type)) + 
   geom_bar(stat = "identity", color = "black") + 
@@ -2713,7 +2772,7 @@ skin.bar.plot <- ggplot(data = skin.cell.melt, aes(x = segmentID,
     panel.grid.major.x = element_blank()
   )
   
-immune.bar.plot <- ggplot(data = immune.cell.melt, aes(x = segmentID, 
+immune.bar.plot <- ggplot(data = immune.cell.melt, aes(x = AOI_ID, 
                                                    y = value, 
                                                    fill = cell.type)) + 
   geom_bar(stat = "identity", color = "black") + 
@@ -2722,9 +2781,33 @@ immune.bar.plot <- ggplot(data = immune.cell.melt, aes(x = segmentID,
     axis.text.x = element_text(angle = 45, hjust = 1),
     panel.grid.major.x = element_blank()
   )
+
+
+# Export Barplots
+export.decon.barplots <- global.export.decon
+if(export.decon.barplots == TRUE){
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_skin_ref_barplot.png"), 
+         skin.bar.plot, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_immune_ref_barplot.png"), 
+         immune.bar.plot, 
+         height = 10, 
+         width = 14)
+  
+}
+
 ```
 
 #### Boxplots Region
+
+##### Region Comparison
 
 ```{r}
 
@@ -2769,6 +2852,31 @@ immune.box.plot <- ggplot(data = immune.cell.melt, aes(x = region,
                      label = "p.signif", 
                      label.y = 30)
 
+# Export Boxplots
+export.decon.boxplots <- global.export.decon
+if(export.decon.boxplots == TRUE){
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_skin_ref_region_boxplot.png"), 
+         skin.box.plot, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_immune_ref_region_boxplot.png"), 
+         immune.box.plot, 
+         height = 10, 
+         width = 14)
+  
+}
+
+```
+
+##### LANA+ vs. Vessel
+
+```{r}
 
 # LANA+ versus Vessel
 
@@ -2804,7 +2912,7 @@ skin.box.plot.LV <- ggplot(data = skin.cell.melt.LV, aes(x = region,
   labs(y = "Percentage of Total") + 
   stat_compare_means(comparisons = tumor.vessel.comparison, 
                      label = "p.signif", 
-                     label.y = 20)
+                     label.y = 50)
 
 immune.box.plot.LV <- ggplot(data = immune.cell.melt.LV, aes(x = region, 
                                                    y = value, 
@@ -2819,5 +2927,378 @@ immune.box.plot.LV <- ggplot(data = immune.cell.melt.LV, aes(x = region,
   stat_compare_means(comparisons = tumor.vessel.comparison, 
                      label = "p.signif", 
                      label.y = 20)
+
+
+# Export Boxplots
+export.decon.boxplots <- global.export.decon
+if(export.decon.boxplots == TRUE){
+  
+  # Export comparison of LANA+ vs. Vessel
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_skin_ref_LANA_v_Vessel_boxplot.png"), 
+         skin.box.plot.LV, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_immune_ref_LANA_v_Vessel_boxplot.png"), 
+         immune.box.plot.LV, 
+         height = 10, 
+         width = 14)
+  
+}
+
+```
+
+##### LANA+ vs. Vessel & Immune
+
+```{r}
+# Set up comparison groups by segment
+segment.comparison <- list(
+  c("LANA_pos", "full_ROI"))
+
+# Subset for only LANA+ and Vessel
+skin.cell.melt.LANA <- skin.cell.melt %>% 
+  filter(segment == "LANA_pos")
+
+skin.cell.melt.vessel.immune <- skin.cell.melt %>% 
+  filter(region %in% c("vessel", "immune"))
+
+skin.cell.melt <- rbind(skin.cell.melt.LANA, skin.cell.melt.vessel.immune)
+
+immune.cell.melt.LANA <- immune.cell.melt %>% 
+  filter(segment == "LANA_pos")
+
+immune.cell.melt.vessel.immune <- immune.cell.melt %>% 
+  filter(region %in% c("vessel", "immune"))
+
+immune.cell.melt <- rbind(immune.cell.melt.LANA, immune.cell.melt.vessel.immune)
+
+# Make the boxplots
+
+skin.box.plot <- ggplot(data = skin.cell.melt, aes(x = segment, 
+                                                   y = value, 
+                                                   fill = region)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y = "Percentage of Total") + 
+  stat_compare_means(comparisons = segment.comparison, 
+                     label = "p.signif", 
+                     label.y = 50)
+
+immune.box.plot <- ggplot(data = immune.cell.melt, aes(x = segment, 
+                                                   y = value, 
+                                                   fill = region)) + 
+  geom_boxplot(color = "black") + 
+  facet_wrap(~cell.type, scales = "free_x") + 
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) + 
+  labs(y = "Percentage of Total") + 
+  stat_compare_means(comparisons = segment.comparison, 
+                     label = "p.signif", 
+                     label.y = 20)
+
+
+# Export Boxplots
+export.decon.boxplots <- global.export.decon
+if(export.decon.boxplots == TRUE){
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_skin_ref_region_boxplot.png"), 
+         skin.box.plot, 
+         height = 10, 
+         width = 14)
+  
+  ggsave(paste0(results.folder, 
+                run.folder, 
+                "spatial_decon/spatial_decon_immune_ref_region_boxplot.png"), 
+         immune.box.plot, 
+         height = 10, 
+         width = 14)
+  
+}
+
+```
+
+
+# test spatial colors
+
+```{r}
+
+library(Polychrome)
+
+twentyone.color.palette <- unname(createPalette(21, 
+                            c("#ff0000", "#00ff00", "#0000ff"), 
+                            M = 1000, 
+                            range = c(10,70)))
+
+object <- q3.normalization.output$object
+
+prof.mtx <- profile_matrix
+ref.mtx <- NULL
+use.custom.prof.mtx = FALSE
+ref.annot <- NULL
+
+
+spatialDeconvolutionEdit <- function(object,
+                                 expr.type = "q_norm",
+                                 prof.mtx,
+                                 clust.rows = TRUE,
+                                 clust.cols = TRUE,
+                                 group.by = "none",
+                                 plot.fontsize = 5,
+                                 use.custom.prof.mtx = FALSE,
+                                 discard.celltype = FALSE,
+                                 normalize = FALSE,
+                                 min.cell.num = 0,
+                                 min.genes = 10,
+                                 ref.mtx,
+                                 ref.annot,
+                                 cell.id.col = "CellID",
+                                 celltype.col = "LabeledCellType") {
+  
+  
+
+  custom.palette <- unname(createPalette(ncol(prof.mtx), 
+                            c("#ff0000", "#00ff00", "#0000ff"), 
+                            M = 1000, 
+                            range = c(10,70)))
+  
+  # Check for Parameter Misspecification Error(s)
+  if (!expr.type %in% names(object@assayData)) {
+    stop("Normalized data slot not found in the data")
+  } else if (!group.by == "none") {
+    if (!group.by %in% colnames(pData(object))) {
+      stop ("Check that group.by category is present in metadata")
+    }
+  }
+  
+  norm.data <- assayDataElement(object, elt = expr.type)
+  
+  # Calculate negative background
+  neg.sub <- negativeControlSubset(object)
+  
+  bg = derive_GeoMx_background(
+    norm = norm.data,
+    probepool = fData(object)$Module,
+    negnames = neg.sub@featureData@data$TargetName
+  )
+  
+  if(use.custom.prof.mtx){
+    # Create custom matrix for input to spatial deconvolution
+    prof.mtx.deconv <- create_profile_matrix(
+      mtx = ref.mtx,
+      cellAnnots = ref.annot,
+      cellNameCol = cell.id.col,
+      cellTypeCol = celltype.col,
+      matrixName = "customDSPmtx",
+      outDir = NULL,
+      normalize = normalize,
+      minCellNum = min.cell.num,
+      minGenes = min.genes,
+      scalingFactor = 1,
+      discardCellTypes = discard.celltype
+  )} else {
+      prof.mtx.deconv <- as.matrix(prof.mtx)
+  }
+  
+  # Run Spatial Deconvolution
+  res <- spatialdecon(
+    norm = norm.data,
+    bg = bg,
+    X = prof.mtx.deconv,
+    align_genes = TRUE
+  )
+  
+  # Format cell abundance df
+  cell.abundance.results <- as.data.frame(t(res$beta))
+  cell.abundance.results$sampleID <- rownames(cell.abundance.results)
+  
+  # Format sample ID mapping
+  annotation <- pData(object)
+  annotation$sampleID <- rownames(annotation)
+  sample.ID.mapping <- annotation %>% 
+    select(sampleID, AOI_ID)
+  
+  # Map the cell abundance sample ID
+  cell.abundance.mapped <- merge(sample.ID.mapping, 
+                                 cell.abundance.results, 
+                                 by = "sampleID")
+  
+  # Rename the rownames for the mapped df and remove mapping columns
+  rownames(cell.abundance.mapped) <- cell.abundance.mapped$AOI_ID
+  cell.abundance.mapped <- cell.abundance.mapped %>% 
+    select(-sampleID, -AOI_ID)
+  
+  
+  # Prepare data for Abundance Barplot
+  cell.comp <- as.data.frame(res$prop_of_all)
+  cell.comp$celltype <- rownames(cell.comp)
+  
+  cell.comp <- melt(cell.comp, 
+                    variable.name = "sampleID")
+  
+  # Map the melted df to AOI_ID
+  cell.comp <- merge(cell.comp, sample.ID.mapping, by = "sampleID")
+  cell.comp <- cell.comp %>% 
+    select(-sampleID)
+  
+  # For checking that composition plots are consistent across runs
+  cell.comp$celltype <- factor(cell.comp$celltype, 
+                               levels = unique(cell.comp$celltype))
+ 
+  
+  # Heatmap and composition barplot optionally sorted by group
+  if (!group.by == "none") {
+    
+    # Prepare group sorted annotation tables for heatmap and barplot
+    annotation.ordered <- annotation %>% 
+      arrange(!!sym(group.by))
+    
+    rownames(annotation.ordered) <- annotation.ordered$AOI_ID
+    
+    #annotation.ordered <- annotation[order(annotation[group.by]),]
+    
+    #annotation.matrix <- as.matrix(annotation)
+    #annotation.ordered <- annotation.matrix[order(annotation.matrix[group.by]),]
+    
+    group.df <- data.frame(group = annotation.ordered[group.by])
+    annotation.row.order <- rownames(group.df)
+    
+    cell.abundance.ordered <- cell.abundance.mapped[annotation.row.order, ]
+    
+    #arr.heat.mtx <-
+    #  cell.abundance.mapped[, match(rownames(group.df), colnames(cell.abundance.mapped))]
+    
+    cell.comp[group.by] <-
+      annotation[group.by][match(cell.comp$variable,
+                            rownames(annotation)),]
+    
+    group.by.mapping <- group.df
+    group.by.mapping$AOI_ID <- rownames(group.df)
+    cell.comp.group <- merge(group.by.mapping, cell.comp)
+    
+    # Create plots
+    set.seed(123)
+    abund.heat <-
+      ComplexHeatmap::pheatmap(
+        cell.abundance.ordered, 
+        cluster_rows = clust.rows,
+        cluster_cols = clust.cols,
+        annotation_row = group.df,
+        legend = FALSE,
+        fontsize = plot.fontsize
+      )
+    
+    set.seed(4)
+    comp.bar <- ggplot(data = cell.comp.group, aes(x = AOI_ID, y = value, 
+                                             fill = celltype)) +
+      geom_bar(stat = "identity") +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1, 
+                                       size = plot.fontsize), 
+            legend.title=element_blank()) +
+      facet_wrap(~ eval(parse(text = group.by)), scales =
+                   "free") + 
+      scale_fill_manual(values = custom.palette)
+    
+  } else {
+    set.seed(123)
+    abund.heat <- ComplexHeatmap::pheatmap(cell.abundance.mapped, 
+                                           cluster_rows = clust.rows, 
+                                           cluster_cols = clust.cols, 
+                                           legend = FALSE,
+                                           fontsize = plot.fontsize)
+    
+    set.seed(4)
+    comp.bar <- ggplot(data = cell.comp, aes(x = AOI_ID, y = value, 
+                                             fill = celltype)) + 
+      geom_bar(stat = "identity") +
+      theme(axis.text.x = element_text(angle = 90, hjust =
+                                         1, size = plot.fontsize), 
+            legend.title=element_blank()) + 
+      scale_fill_manual(values = custom.palette)
+  }
+  
+  set.seed(6)
+  # Heatmap of cell profile matrix used ~ res$X
+  cell.prof.heat <- ComplexHeatmap::pheatmap(res$X, 
+                                             cluster_rows = clust.rows,
+                                             cluster_cols = clust.cols, 
+                                             legend = FALSE,
+                                             fontsize = plot.fontsize)
+  
+  # Creates and stores all ggplot figures in a list
+  plot.list = list(
+    abundance.heatmap = abund.heat,
+    cell.profile.heatmap = cell.prof.heat,
+    composition.barplot = comp.bar
+  )
+  
+  final.dsp.results <- list(dsp.data = res, figures = plot.list)
+  
+  return(final.dsp.results)
+}
+
+
+spatial.decon <- spatialDeconvolutionEdit(object = object, 
+                                          expr.type = "q_norm",
+                                          prof.mtx = prof.mtx,
+                                          clust.rows = TRUE,
+                                          clust.cols = TRUE,
+                                          group.by = "none",
+                                          plot.fontsize = 5,
+                                          use.custom.prof.mtx = FALSE,
+                                          discard.celltype = FALSE,
+                                          normalize = FALSE,
+                                          min.cell.num = 0,
+                                          min.genes = 10,
+                                          ref.mtx = NULL,
+                                          ref.annot = NULL,
+                                          cell.id.col = "CellID",
+                                          celltype.col = "LabeledCellType")
+
+
+```
+# Create new ID column
+
+```{r}
+
+# Gather the columns to combine
+columns.to.combine <- c("class", "region", "segment", "slide_name", "roi")
+
+annotation.columns <- sData(object) %>% 
+  select(all_of(columns.to.combine))
+
+
+
+pData(object)$AOI_ID <- paste0(str_extract_all(pData(object)$class, 
+                                               "\\b\\w"[[1]]), 
+    "_", 
+    str_extract_all(pData(object)$region, "\\b\\w"[[1]]), 
+    "_", 
+    str_extract_all(pData(object)$segment, "\\b\\w"[[1]]), 
+    "_", 
+    str_extract_all(gsub("slide_", "", pData(object)$slide_name), "\\b\\w"[[1]]), 
+    "_", 
+    sData(object)$roi)
+
+segment.id.length <- 4
+
+pData(object)$AOI_ID <- paste0(substr(pData(object)$Tumor, 
+    1, segment.id.length), "|", substr(pData(object)$Source, 
+    1, segment.id.length), "|", substr(pData(object)$region, 
+    1, segment.id.length), "|", substr(pData(object)$segment, 
+    1, segment.id.length), "|", substr(gsub("slide_", "", pData(object)$slide_name), 
+    1, segment.id.length), "|", sData(object)$roi)
 
 ```
